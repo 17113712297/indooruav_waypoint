@@ -1,0 +1,11 @@
+# indooruav_waypoint recorded waypoints
+# generated_at: 2026-05-13 21:32:11
+# count: 6
+# fields: x [m], y [m], z [m], yaw_deg [deg]
+waypoints:
+  - {x: 0.636, y: 0.024, z: 2.351, yaw_deg: -0.1}
+  - {x: 1.161, y: 0.024, z: 2.348, yaw_deg: -0.1}
+  - {x: 1.691, y: 0.021, z: 2.345, yaw_deg: -0.1}
+  - {x: 2.297, y: 0.010, z: 2.322, yaw_deg: -0.1}
+  - {x: 2.891, y: -0.002, z: 2.299, yaw_deg: -0.1}
+  - {x: 3.504, y: -0.008, z: 2.291, yaw_deg: -0.1}

@@ -1,0 +1,93 @@
+# indooruav_waypoint 功能包统一配置
+# 该 yaml 由 launch 文件以 rosparam load 方式加载到节点的私有命名空间
+
+indooruav_waypoint:
+
+  # ============================================================
+  # 航点跟踪器：waypoint_tracker_node
+  # ============================================================
+  waypoint_tracker:
+
+    # ----- 话题 -----
+    topics:
+      # 订阅的实时里程计话题（与 position_controller 保持一致）
+      current_odometry: /Odometry_global_rotate
+      # 发布的目标里程计话题（当前正在追踪的航点，阶跃信号，用于可视化/调试）
+      desired_odometry: indooruav_controller/waypoint_tracker/odom_goal
+      # 发布的速度指令话题
+      velocity_command: indooruav_controller/waypoint_tracker/cmd_vel
+
+    # ----- 服务 -----
+    services:
+      # 启动追踪
+      start: indooruav_controller/waypoint_tracker/start
+      # 暂停追踪（保留当前航点索引）
+      pause: indooruav_controller/waypoint_tracker/pause
+      # 关闭追踪并复位（航点索引归零）
+      stop: indooruav_controller/waypoint_tracker/stop
+
+    # ----- 航点文件路径 -----
+    # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
+    waypoints_package_name: indooruav_waypoint
+    waypoints_file_path: config/waypoints.yaml
+
+    # ----- 控制器基本参数 -----
+    parameters:
+      # 控制频率
+      control_rate_hz: 30.0
+      # 实时里程计超时阈值，超过则发送一次零速指令并将限幅器清零
+      odometry_timeout_s: 0.2
+      # 节点启动后是否自动进入 RUNNING 状态。false 时需手动调用 start 服务
+      autostart: true
+
+      # 巡航速度（写死，不使用 PID）
+      xy_speed_mps: 0.5     # XY 合速度
+      z_speed_mps: 0.3      # Z 速度
+      yaw_speed_dps: 30.0   # Yaw 速度（°/s）
+
+      # 三阶速率限幅参数（snap 设大值即退化为二阶）
+      xy_accel_max_mps2: 0.5
+      xy_jerk_max_mps3: 2.0
+      xy_snap_max_mps4: 1.0e6
+
+      z_accel_max_mps2: 0.4
+      z_jerk_max_mps3: 2.0
+      z_snap_max_mps4: 1.0e6
+
+      yaw_accel_max_dps2: 60.0
+      yaw_jerk_max_dps3: 300.0
+      yaw_snap_max_dps4: 1.0e6
+
+      # 到达判定阈值（XY、Z、yaw 三项必须同时满足才切换下一个航点）
+      xy_arrival_tolerance_m: 0.5
+      z_arrival_tolerance_m: 0.5
+      yaw_arrival_tolerance_deg: 5.0
+
+  # ============================================================
+  # 航点录制器：waypoint_recorder_node
+  # ============================================================
+  waypoint_recorder:
+
+    # ----- 话题 -----
+    topics:
+      # 与 tracker 订阅同一个话题，确保坐标系一致
+      current_odometry: /Odometry_global_rotate
+
+    # ----- 服务 -----
+    services:
+      # 触发记录当前位置为新航点
+      record: indooruav_controller/waypoint_recorder/record
+      # 触发将内存中的航点列表整文件覆盖写入 YAML
+      save: indooruav_controller/waypoint_recorder/save
+      # 触发清空内存中的航点列表
+      clear: indooruav_controller/waypoint_recorder/clear
+
+    # ----- 航点保存路径 -----
+    # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
+    waypoints_package_name: indooruav_waypoint
+    waypoints_file_path: config/waypoints.yaml
+
+    # ----- 录制器基本参数 -----
+    parameters:
+      # 节点启动时如果目标文件已存在，是否在内存中预加载（true 续录、false 从空开始）
+      load_existing: false

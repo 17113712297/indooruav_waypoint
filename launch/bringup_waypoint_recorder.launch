@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    启动 waypoint_recorder_node：订阅实时里程计，通过 std_srvs/Trigger 服务接收人工触发，
+    把当前位置追加为航点，触发 save 后整文件覆盖写入 YAML。
+
+    服务调用示例：
+      rosservice call indooruav_controller/waypoint_recorder/record "{}"
+      rosservice call indooruav_controller/waypoint_recorder/save   "{}"
+      rosservice call indooruav_controller/waypoint_recorder/clear  "{}"
+  -->
+
+  <arg name="config_file"
+       default="$(find indooruav_waypoint)/config/config.yaml"/>
+
+  <rosparam command="load" file="$(arg config_file)"/>
+
+  <node pkg="indooruav_waypoint"
+        type="waypoint_recorder_node"
+        name="waypoint_recorder_node"
+        output="screen"
+        respawn="false"/>
+</launch>

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<launch>
+  <!--
+    启动 waypoint_tracker_node：加载航点 YAML，订阅实时里程计，发布速度指令到 indooruav_controller/waypoint_tracker/cmd_vel。
+
+    config.yaml 的内容会以嵌套结构整体加载到全局参数服务器：
+      /indooruav_waypoint/waypoint_tracker/topics/current_odometry
+      /indooruav_waypoint/waypoint_tracker/parameters/xy_speed_mps
+      ...
+    节点内部用绝对路径读取这些参数。
+  -->
+
+  <arg name="config_file"
+       default="$(find indooruav_waypoint)/config/config.yaml"/>
+
+  <rosparam command="load" file="$(arg config_file)"/>
+
+  <node pkg="indooruav_waypoint"
+        type="waypoint_tracker_node"
+        name="waypoint_tracker_node"
+        output="screen"
+        respawn="false"/>
+</launch>

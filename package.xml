@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>indooruav_waypoint</name>
+  <version>0.1.0</version>
+  <description>
+    室内无人机航点录制与跟踪功能包。
+    包含两个节点：
+      - waypoint_recorder_node：通过 ROS Service 触发，记录当前位置为航点并保存为 YAML 文件
+      - waypoint_tracker_node：加载 YAML 航点文件，按预设速度跟踪并发布速度指令到 /drone/cmd_vel
+  </description>
+
+  <maintainer email="todo@todo.todo">indooruav</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>roslib</depend>
+  <depend>std_srvs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>yaml-cpp</depend>
+</package>
