@@ -40,10 +40,21 @@ indooruav_waypoint:
       # 节点启动后是否自动进入 RUNNING 状态。false 时需手动调用 start 服务
       autostart: true
 
-      # 巡航速度（写死，不使用 PID）
-      xy_speed_mps: 0.5     # XY 合速度
-      z_speed_mps: 0.3      # Z 速度
-      yaw_speed_dps: 30.0   # Yaw 速度（°/s）
+      # 巡航速度（速度上限）
+      xy_speed_mps: 0.2    # XY 合速度
+      z_speed_mps: 0.1      # Z 速度
+      yaw_speed_dps: 10.0   # Yaw 速度（°/s）
+
+      # 位置 P 反馈增益：速度幅值 = min(v_max, sqrt(2·a·d), Kp·d)
+      # Kp 越大，越激进；Kp 太小则收敛慢但稳。建议起点：v_max / 制动距离 的一半
+      kp_xy: 2.0            # 单位 1/s，作用于 XY 距离误差
+      kp_z: 1.5             # 单位 1/s，作用于 Z 距离误差
+      kp_yaw: 1.5           # 单位 1/s，作用于 yaw 角度误差（rad）
+
+      # 中间航点切换半径：当 d_xy < lookahead_radius_m 时直接切到下一个航点，
+      # 不再要求 xy/z/yaw 三项容差全部命中。末点仍按下面的 *_arrival_tolerance 严格判定。
+      # 注意：lookahead_radius_m 应不小于 xy_arrival_tolerance_m，否则中间点退化为"逐点停"
+      lookahead_radius_m: 0.01     
 
       # 三阶速率限幅参数（snap 设大值即退化为二阶）
       xy_accel_max_mps2: 0.5
@@ -59,8 +70,8 @@ indooruav_waypoint:
       yaw_snap_max_dps4: 1.0e6
 
       # 到达判定阈值（XY、Z、yaw 三项必须同时满足才切换下一个航点）
-      xy_arrival_tolerance_m: 0.5
-      z_arrival_tolerance_m: 0.5
+      xy_arrival_tolerance_m: 0.1
+      z_arrival_tolerance_m: 0.1
       yaw_arrival_tolerance_deg: 5.0
 
   # ============================================================

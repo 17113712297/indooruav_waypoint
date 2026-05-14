@@ -162,7 +162,16 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     config_.yaw_limits.j_max = DegToRad(yaw_jerk_dps3);
     config_.yaw_limits.s_max = DegToRad(yaw_snap_dps4);
 
-    // 到达阈值
+    // 位置 P 反馈增益
+    nh_.param<double>(p + "parameters/kp_xy", config_.kp_xy, 2.0);
+    nh_.param<double>(p + "parameters/kp_z", config_.kp_z, 1.5);
+    nh_.param<double>(p + "parameters/kp_yaw", config_.kp_yaw, 1.5);
+
+    // 中间航点 lookahead 切换半径
+    nh_.param<double>(p + "parameters/lookahead_radius_m",
+                      config_.lookahead_radius_m, 0.30);
+
+    // 到达阈值（仅末点强制判定）
     nh_.param<double>(p + "parameters/xy_arrival_tolerance_m",
                       config_.xy_arrival_tolerance_m, 0.15);
     nh_.param<double>(p + "parameters/z_arrival_tolerance_m",
@@ -172,6 +181,12 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<double>(p + "parameters/yaw_arrival_tolerance_deg",
                       yaw_tol_deg, 5.0);
     config_.yaw_arrival_tolerance_rad = DegToRad(yaw_tol_deg);
+
+    // 数值兜底：增益必须非负
+    config_.kp_xy = std::max(config_.kp_xy, 0.0);
+    config_.kp_z = std::max(config_.kp_z, 0.0);
+    config_.kp_yaw = std::max(config_.kp_yaw, 0.0);
+    config_.lookahead_radius_m = std::max(config_.lookahead_radius_m, 0.0);
 
     // 数值兜底
     config_.control_rate_hz = std::max(config_.control_rate_hz, 1.0);
@@ -189,6 +204,9 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
              config_.xy_arrival_tolerance_m,
              config_.z_arrival_tolerance_m,
              yaw_tol_deg);
+    ROS_INFO("[WaypointTracker] Kp xy=%.2f, z=%.2f, yaw=%.2f (1/s); lookahead=%.2fm",
+             config_.kp_xy, config_.kp_z, config_.kp_yaw,
+             config_.lookahead_radius_m);
     ROS_INFO("[WaypointTracker] control_rate=%.1f Hz, odom_timeout=%.3f s, autostart=%s",
              config_.control_rate_hz,
              config_.odometry_timeout_s,
@@ -640,20 +658,21 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const Waypoint& target = waypoints_[current_index_];
     const auto& current_pos = latest_odometry_.pose.pose.position;
 
+    const bool is_last_waypoint =
+        (current_index_ + 1 >= waypoints_.size());
+
     // ---------------- XY ----------------
     const double dx = target.x_m - current_pos.x;
     const double dy = target.y_m - current_pos.y;
     const double d_xy = std::sqrt(dx * dx + dy * dy);
 
-    // 末点预制动；中间点直通（fly-through）
-    const bool is_last_waypoint =
-        (current_index_ + 1 >= waypoints_.size());
-    double xy_speed_target = config_.xy_speed_mps;
-    if (is_last_waypoint) {
-        const double v_stop_xy =
-            std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
-        xy_speed_target = std::min(config_.xy_speed_mps, v_stop_xy);
-    }
+    // 速度幅值合成：min(v_max, sqrt(2·a·d), Kp·d)
+    // 预制动保证物理可停，P 反馈保证近距离自然减速。所有航点都启用预制动。
+    const double v_stop_xy =
+        std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
+    const double v_p_xy = config_.kp_xy * d_xy;
+    const double xy_speed_target =
+        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
 
     double target_vx_world = 0.0;
     double target_vy_world = 0.0;
@@ -669,25 +688,33 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     // ---------------- Z ----------------
     const double dz = target.z_m - current_pos.z;
     const double abs_dz = std::fabs(dz);
-    // Z 始终预制动（每段都减速到 0），fly-through 仅适用于 XY
     const double v_stop_z =
         std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
-    const double z_speed_target =
-        SignOf(dz) * std::min(config_.z_speed_mps, v_stop_z);
+    const double v_p_z = config_.kp_z * abs_dz;
+    const double z_speed_mag =
+        std::min({config_.z_speed_mps, v_stop_z, v_p_z});
+    const double z_speed_target = SignOf(dz) * z_speed_mag;
     *vz_world = z_limiter_.Update(z_speed_target, dt);
 
     // ---------------- Yaw ----------------
     const double yaw_err = NormalizeAngleRad(target.yaw_rad - current_yaw_rad);
     const double abs_yaw_err = std::fabs(yaw_err);
-    // Yaw 始终预制动
     const double v_stop_yaw =
         std::sqrt(2.0 * config_.yaw_limits.a_max * abs_yaw_err);
-    const double yaw_speed_target =
-        SignOf(yaw_err) * std::min(config_.yaw_speed_radps, v_stop_yaw);
+    const double v_p_yaw = config_.kp_yaw * abs_yaw_err;
+    const double yaw_speed_mag =
+        std::min({config_.yaw_speed_radps, v_stop_yaw, v_p_yaw});
+    const double yaw_speed_target = SignOf(yaw_err) * yaw_speed_mag;
     *vyaw = yaw_limiter_.Update(yaw_speed_target, dt);
 
     // ---------------- 到达判定 ----------------
-    *arrived = IsArrivedAtCurrentTarget(d_xy, abs_dz, abs_yaw_err);
+    // 中间航点：d_xy < lookahead_radius 即切换（fly-through 平滑切弯）
+    // 末点：xy/z/yaw 三项严格容差全部命中
+    if (is_last_waypoint) {
+        *arrived = IsArrivedAtCurrentTarget(d_xy, abs_dz, abs_yaw_err);
+    } else {
+        *arrived = (d_xy <= config_.lookahead_radius_m);
+    }
 }
 
 bool WaypointTracker::IsArrivedAtCurrentTarget(

@@ -84,7 +84,15 @@ private:
         SmoothVelocityLimiter::Limits z_limits;
         SmoothVelocityLimiter::Limits yaw_limits;
 
-        // 到达阈值
+        // 位置 P 反馈增益
+        double kp_xy = 2.0;     // 1/s
+        double kp_z = 1.5;      // 1/s
+        double kp_yaw = 1.5;    // 1/s
+
+        // 中间航点 lookahead 切换半径（仅作用于非末点）
+        double lookahead_radius_m = 0.30;
+
+        // 到达阈值（末点严格判定）
         double xy_arrival_tolerance_m = 0.15;
         double z_arrival_tolerance_m = 0.15;
         double yaw_arrival_tolerance_rad = 0.0;  // 由 deg 转换
