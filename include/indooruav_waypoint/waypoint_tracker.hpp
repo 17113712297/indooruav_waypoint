@@ -45,6 +45,13 @@ private:
         FINISHED,   // 已完成最后一个航点：发零速悬停
     };
 
+    // 每个航点的到达阶段（三阶段顺序判定，已达标不回退）
+    enum class Phase {
+        PHASE_XY,   // 正在收敛 XY
+        PHASE_Z,    // XY 已达标，正在收敛 Z
+        PHASE_YAW,  // XY/Z 已达标，正在收敛 Yaw
+    };
+
     // 内存中的航点（位置 + yaw，单位米/弧度）
     struct Waypoint {
         double x_m = 0.0;
@@ -89,10 +96,7 @@ private:
         double kp_z = 1.5;      // 1/s
         double kp_yaw = 1.5;    // 1/s
 
-        // 中间航点 lookahead 切换半径（仅作用于非末点）
-        double lookahead_radius_m = 0.30;
-
-        // 到达阈值（末点严格判定）
+        // 到达阈值
         double xy_arrival_tolerance_m = 0.15;
         double z_arrival_tolerance_m = 0.15;
         double yaw_arrival_tolerance_rad = 0.0;  // 由 deg 转换
@@ -138,7 +142,7 @@ private:
     void EnterRunningLocked();
     void EnterPausedLocked();
     void EnterFinishedLocked();
-    bool IsArrivedAtCurrentTarget(double xy_err, double z_err, double yaw_err) const;
+
 
     // 数学工具（与 position_controller.hpp 保持一致）
     static double GetYawFromQuaternion(const geometry_msgs::Quaternion& q);
@@ -180,6 +184,7 @@ private:
 
     // 状态机
     State state_ = State::IDLE;
+    Phase phase_ = Phase::PHASE_XY;
 
     // 限幅器：XY 在世界系下分两个轴跑独立限幅器，
     // 这样航点切换时方向跳变可被限幅器自然处理为平滑过渡（即"切弯"）。

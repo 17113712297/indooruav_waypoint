@@ -167,11 +167,7 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<double>(p + "parameters/kp_z", config_.kp_z, 1.5);
     nh_.param<double>(p + "parameters/kp_yaw", config_.kp_yaw, 1.5);
 
-    // 中间航点 lookahead 切换半径
-    nh_.param<double>(p + "parameters/lookahead_radius_m",
-                      config_.lookahead_radius_m, 0.30);
-
-    // 到达阈值（仅末点强制判定）
+    // 到达阈值
     nh_.param<double>(p + "parameters/xy_arrival_tolerance_m",
                       config_.xy_arrival_tolerance_m, 0.15);
     nh_.param<double>(p + "parameters/z_arrival_tolerance_m",
@@ -186,8 +182,6 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     config_.kp_xy = std::max(config_.kp_xy, 0.0);
     config_.kp_z = std::max(config_.kp_z, 0.0);
     config_.kp_yaw = std::max(config_.kp_yaw, 0.0);
-    config_.lookahead_radius_m = std::max(config_.lookahead_radius_m, 0.0);
-
     // 数值兜底
     config_.control_rate_hz = std::max(config_.control_rate_hz, 1.0);
     config_.odometry_timeout_s = std::max(config_.odometry_timeout_s, 0.01);
@@ -204,9 +198,8 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
              config_.xy_arrival_tolerance_m,
              config_.z_arrival_tolerance_m,
              yaw_tol_deg);
-    ROS_INFO("[WaypointTracker] Kp xy=%.2f, z=%.2f, yaw=%.2f (1/s); lookahead=%.2fm",
-             config_.kp_xy, config_.kp_z, config_.kp_yaw,
-             config_.lookahead_radius_m);
+    ROS_INFO("[WaypointTracker] Kp xy=%.2f, z=%.2f, yaw=%.2f (1/s)",
+             config_.kp_xy, config_.kp_z, config_.kp_yaw);
     ROS_INFO("[WaypointTracker] control_rate=%.1f Hz, odom_timeout=%.3f s, autostart=%s",
              config_.control_rate_hz,
              config_.odometry_timeout_s,
@@ -455,6 +448,7 @@ void WaypointTracker::EnterIdleLocked() {
 
 void WaypointTracker::EnterRunningLocked() {
     state_ = State::RUNNING;
+    phase_ = Phase::PHASE_XY;
     // 保留限幅器历史状态以保证速度连续；
     // 但若 last_control_time_ 已陈旧（pause 期间），强制下个 tick 当作 dt=0 起步
     last_control_time_ = ros::Time();
@@ -576,9 +570,9 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                             &arrived);
 
                         if (arrived) {
-                            // 到达当前目标航点
                             const std::size_t old_index = current_index_;
                             ++current_index_;
+                            phase_ = Phase::PHASE_XY;
                             ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu",
                                      old_index,
                                      waypoints_.empty() ? 0 : (waypoints_.size() - 1));
@@ -588,8 +582,7 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                                 publish_cmd = true;  // 发零速
                                 publish_desired_step = false;
                             } else {
-                                // 切到下一个目标，本周期发刚算出的速度
-                                // （限幅器状态保留以实现 fly-through）
+                                // 切换航点，本周期速度已置零，下个 tick 从 PHASE_XY 开始
                                 double vx_body = 0.0;
                                 double vy_body = 0.0;
                                 TransformWorldFluVelocityToBodyFlu(
@@ -658,43 +651,57 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const Waypoint& target = waypoints_[current_index_];
     const auto& current_pos = latest_odometry_.pose.pose.position;
 
-    const bool is_last_waypoint =
-        (current_index_ + 1 >= waypoints_.size());
-
     // ---------------- XY ----------------
     const double dx = target.x_m - current_pos.x;
     const double dy = target.y_m - current_pos.y;
     const double d_xy = std::sqrt(dx * dx + dy * dy);
 
-    // 速度幅值合成：min(v_max, sqrt(2·a·d), Kp·d)
-    // 预制动保证物理可停，P 反馈保证近距离自然减速。所有航点都启用预制动。
-    const double v_stop_xy =
-        std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
-    const double v_p_xy = config_.kp_xy * d_xy;
-    const double xy_speed_target =
-        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
+    if (phase_ == Phase::PHASE_XY) {
+        const double v_stop_xy =
+            std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
+        const double v_p_xy = config_.kp_xy * d_xy;
+        const double xy_speed_target =
+            std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
 
-    double target_vx_world = 0.0;
-    double target_vy_world = 0.0;
-    if (d_xy > 1e-6) {
-        const double inv_d = 1.0 / d_xy;
-        target_vx_world = xy_speed_target * dx * inv_d;
-        target_vy_world = xy_speed_target * dy * inv_d;
+        double target_vx_world = 0.0;
+        double target_vy_world = 0.0;
+        if (d_xy > 1e-6) {
+            const double inv_d = 1.0 / d_xy;
+            target_vx_world = xy_speed_target * dx * inv_d;
+            target_vy_world = xy_speed_target * dy * inv_d;
+        }
+
+        *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
+        *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
+
+        if (d_xy <= config_.xy_arrival_tolerance_m) {
+            xy_vx_limiter_.Reset();
+            xy_vy_limiter_.Reset();
+            *vx_world = 0.0;
+            *vy_world = 0.0;
+            phase_ = Phase::PHASE_Z;
+        }
     }
-
-    *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
-    *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
 
     // ---------------- Z ----------------
     const double dz = target.z_m - current_pos.z;
     const double abs_dz = std::fabs(dz);
-    const double v_stop_z =
-        std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
-    const double v_p_z = config_.kp_z * abs_dz;
-    const double z_speed_mag =
-        std::min({config_.z_speed_mps, v_stop_z, v_p_z});
-    const double z_speed_target = SignOf(dz) * z_speed_mag;
-    *vz_world = z_limiter_.Update(z_speed_target, dt);
+
+    if (phase_ == Phase::PHASE_XY || phase_ == Phase::PHASE_Z) {
+        const double v_stop_z =
+            std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
+        const double v_p_z = config_.kp_z * abs_dz;
+        const double z_speed_mag =
+            std::min({config_.z_speed_mps, v_stop_z, v_p_z});
+        const double z_speed_target = SignOf(dz) * z_speed_mag;
+        *vz_world = z_limiter_.Update(z_speed_target, dt);
+    }
+
+    if (phase_ == Phase::PHASE_Z && abs_dz <= config_.z_arrival_tolerance_m) {
+        z_limiter_.Reset();
+        *vz_world = 0.0;
+        phase_ = Phase::PHASE_YAW;
+    }
 
     // ---------------- Yaw ----------------
     const double yaw_err = NormalizeAngleRad(target.yaw_rad - current_yaw_rad);
@@ -707,21 +714,11 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const double yaw_speed_target = SignOf(yaw_err) * yaw_speed_mag;
     *vyaw = yaw_limiter_.Update(yaw_speed_target, dt);
 
-    // ---------------- 到达判定 ----------------
-    // 中间航点：d_xy < lookahead_radius 即切换（fly-through 平滑切弯）
-    // 末点：xy/z/yaw 三项严格容差全部命中
-    if (is_last_waypoint) {
-        *arrived = IsArrivedAtCurrentTarget(d_xy, abs_dz, abs_yaw_err);
-    } else {
-        *arrived = (d_xy <= config_.lookahead_radius_m);
+    if (phase_ == Phase::PHASE_YAW && abs_yaw_err <= config_.yaw_arrival_tolerance_rad) {
+        yaw_limiter_.Reset();
+        *vyaw = 0.0;
+        *arrived = true;
     }
-}
-
-bool WaypointTracker::IsArrivedAtCurrentTarget(
-    double xy_err, double z_err, double yaw_err_abs) const {
-    return xy_err <= config_.xy_arrival_tolerance_m &&
-           z_err <= config_.z_arrival_tolerance_m &&
-           yaw_err_abs <= config_.yaw_arrival_tolerance_rad;
 }
 
 // =============================================================================
