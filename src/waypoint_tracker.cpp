@@ -165,23 +165,34 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     // 位置 P 反馈增益
     nh_.param<double>(p + "parameters/kp_xy", config_.kp_xy, 2.0);
     nh_.param<double>(p + "parameters/kp_z", config_.kp_z, 1.5);
-    nh_.param<double>(p + "parameters/kp_yaw", config_.kp_yaw, 1.5);
+    nh_.param<double>(p + "parameters/kp_yaw_rotate",
+                      config_.kp_yaw_rotate, 3.0);
+    nh_.param<double>(p + "parameters/kp_yaw_hold",
+                      config_.kp_yaw_hold, 0.5);
 
-    // 到达阈值
+    // 到达 / 切换阈值
     nh_.param<double>(p + "parameters/xy_arrival_tolerance_m",
                       config_.xy_arrival_tolerance_m, 0.15);
     nh_.param<double>(p + "parameters/z_arrival_tolerance_m",
                       config_.z_arrival_tolerance_m, 0.15);
 
-    double yaw_tol_deg = 5.0;
+    double yaw_rotation_tol_deg = 5.0;
+    double yaw_arrival_tol_deg = 5.0;
+    nh_.param<double>(p + "parameters/yaw_rotation_tolerance_deg",
+                      yaw_rotation_tol_deg, 5.0);
     nh_.param<double>(p + "parameters/yaw_arrival_tolerance_deg",
-                      yaw_tol_deg, 5.0);
-    config_.yaw_arrival_tolerance_rad = DegToRad(yaw_tol_deg);
+                      yaw_arrival_tol_deg, 5.0);
+    config_.yaw_rotation_tolerance_rad = DegToRad(yaw_rotation_tol_deg);
+    config_.yaw_arrival_tolerance_rad = DegToRad(yaw_arrival_tol_deg);
+
+    nh_.param<bool>(p + "parameters/ignore_arrival_yaw",
+                    config_.ignore_arrival_yaw, true);
 
     // 数值兜底：增益必须非负
     config_.kp_xy = std::max(config_.kp_xy, 0.0);
     config_.kp_z = std::max(config_.kp_z, 0.0);
-    config_.kp_yaw = std::max(config_.kp_yaw, 0.0);
+    config_.kp_yaw_rotate = std::max(config_.kp_yaw_rotate, 0.0);
+    config_.kp_yaw_hold = std::max(config_.kp_yaw_hold, 0.0);
     // 数值兜底
     config_.control_rate_hz = std::max(config_.control_rate_hz, 1.0);
     config_.odometry_timeout_s = std::max(config_.odometry_timeout_s, 0.01);
@@ -194,12 +205,16 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
                     << config_.velocity_command_topic);
     ROS_INFO("[WaypointTracker] xy_speed=%.2f m/s, z_speed=%.2f m/s, yaw_speed=%.1f deg/s",
              config_.xy_speed_mps, config_.z_speed_mps, yaw_speed_dps);
-    ROS_INFO("[WaypointTracker] arrival tol: xy=%.2fm, z=%.2fm, yaw=%.1fdeg",
+    ROS_INFO("[WaypointTracker] arrival tol: xy=%.2fm, z=%.2fm, "
+             "yaw_rotation=%.1fdeg, yaw_arrival=%.1fdeg, ignore_arrival_yaw=%s",
              config_.xy_arrival_tolerance_m,
              config_.z_arrival_tolerance_m,
-             yaw_tol_deg);
-    ROS_INFO("[WaypointTracker] Kp xy=%.2f, z=%.2f, yaw=%.2f (1/s)",
-             config_.kp_xy, config_.kp_z, config_.kp_yaw);
+             yaw_rotation_tol_deg,
+             yaw_arrival_tol_deg,
+             config_.ignore_arrival_yaw ? "true" : "false");
+    ROS_INFO("[WaypointTracker] Kp xy=%.2f, z=%.2f, yaw_rotate=%.2f, yaw_hold=%.2f (1/s)",
+             config_.kp_xy, config_.kp_z,
+             config_.kp_yaw_rotate, config_.kp_yaw_hold);
     ROS_INFO("[WaypointTracker] control_rate=%.1f Hz, odom_timeout=%.3f s, autostart=%s",
              config_.control_rate_hz,
              config_.odometry_timeout_s,
@@ -442,26 +457,30 @@ bool WaypointTracker::StopServiceCallback(std_srvs::Trigger::Request& req,
 
 void WaypointTracker::EnterIdleLocked() {
     state_ = State::IDLE;
+    phase_ = Phase::PHASE_ROTATE;
     ResetLimiters();
     last_control_time_ = ros::Time();
 }
 
 void WaypointTracker::EnterRunningLocked() {
     state_ = State::RUNNING;
-    phase_ = Phase::PHASE_XY;
-    // 保留限幅器历史状态以保证速度连续；
-    // 但若 last_control_time_ 已陈旧（pause 期间），强制下个 tick 当作 dt=0 起步
+    // 每次进入 RUNNING 都从当前航点的“原地旋转”阶段开始；
+    // 限幅器一律清零，保证旋转从静止起步，避免 pause/stop 残留状态污染。
+    phase_ = Phase::PHASE_ROTATE;
+    ResetLimiters();
     last_control_time_ = ros::Time();
 }
 
 void WaypointTracker::EnterPausedLocked() {
     state_ = State::PAUSED;
+    phase_ = Phase::PHASE_ROTATE;
     ResetLimiters();
     last_control_time_ = ros::Time();
 }
 
 void WaypointTracker::EnterFinishedLocked() {
     state_ = State::FINISHED;
+    phase_ = Phase::PHASE_ROTATE;
     ResetLimiters();
     last_control_time_ = ros::Time();
     ROS_INFO("[WaypointTracker] All waypoints completed. Holding position.");
@@ -572,7 +591,9 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                         if (arrived) {
                             const std::size_t old_index = current_index_;
                             ++current_index_;
-                            phase_ = Phase::PHASE_XY;
+                            // 进入下一个航点：回到 PHASE_ROTATE，清空限幅器
+                            phase_ = Phase::PHASE_ROTATE;
+                            ResetLimiters();
                             ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu",
                                      old_index,
                                      waypoints_.empty() ? 0 : (waypoints_.size() - 1));
@@ -582,16 +603,12 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                                 publish_cmd = true;  // 发零速
                                 publish_desired_step = false;
                             } else {
-                                // 切换航点，本周期速度已置零，下个 tick 从 PHASE_XY 开始
-                                double vx_body = 0.0;
-                                double vy_body = 0.0;
-                                TransformWorldFluVelocityToBodyFlu(
-                                    vx_world, vy_world, current_yaw,
-                                    &vx_body, &vy_body);
-                                out_cmd.linear.x = vx_body;
-                                out_cmd.linear.y = vy_body;
-                                out_cmd.linear.z = vz_world;
-                                out_cmd.angular.z = vyaw;
+                                // 本周期 ComputeDesiredWorldVelocities 已将四个速度置零；
+                                // 下个 tick 从新航点的 PHASE_ROTATE 起步。
+                                out_cmd.linear.x = 0.0;
+                                out_cmd.linear.y = 0.0;
+                                out_cmd.linear.z = 0.0;
+                                out_cmd.angular.z = 0.0;
                                 publish_cmd = true;
                                 publish_desired_step = true;
                             }
@@ -635,6 +652,14 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
 
 // 计算当前 tick 的期望世界系速度（执行限幅器 Update）
 // 在 mutex_ 已锁定的前提下调用
+//
+// 两阶段流程：
+//   PHASE_ROTATE：仅 yaw 用大 P 旋转到目标 yaw，xyz 速度恒为 0；
+//                 |yaw_err| ≤ yaw_rotation_tolerance_rad 时切换到 PHASE_MOVE。
+//                 切换时不重置 yaw 限幅器，让其残余角速度通过下一阶段的小 P 自然衰减。
+//   PHASE_MOVE  ：xy/z 同时收敛到目标位置；yaw 用小 P 保持目标 yaw；
+//                 到达判定基于 xy 与 z 容差（ignore_arrival_yaw=false 时还要求 yaw 容差）。
+//                 到达后所有速度置零、所有限幅器 Reset、返回 arrived=true。
 void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
                                                     double current_yaw_rad,
                                                     double* vx_world,
@@ -651,71 +676,88 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const Waypoint& target = waypoints_[current_index_];
     const auto& current_pos = latest_odometry_.pose.pose.position;
 
-    // ---------------- XY ----------------
+    const double yaw_err = NormalizeAngleRad(target.yaw_rad - current_yaw_rad);
+    const double abs_yaw_err = std::fabs(yaw_err);
+
+    // ---------------- 阶段 1：原地旋转 ----------------
+    if (phase_ == Phase::PHASE_ROTATE) {
+        if (abs_yaw_err <= config_.yaw_rotation_tolerance_rad) {
+            // 已在旋转容差内，直接切到移动阶段，并继续走 PHASE_MOVE 分支
+            phase_ = Phase::PHASE_MOVE;
+            // 不 return，继续 fall-through 进入 PHASE_MOVE 计算
+        } else {
+            // 仅旋转 yaw：xy 和 z 速度保持 0
+            const double v_stop_yaw =
+                std::sqrt(2.0 * config_.yaw_limits.a_max * abs_yaw_err);
+            const double v_p_yaw = config_.kp_yaw_rotate * abs_yaw_err;
+            const double yaw_speed_mag = std::min(
+                {config_.yaw_speed_radps, v_stop_yaw, v_p_yaw});
+            const double yaw_speed_target = SignOf(yaw_err) * yaw_speed_mag;
+
+            *vyaw = yaw_limiter_.Update(yaw_speed_target, dt);
+            // xy/z 限幅器不更新，保持上次 Reset 之后的 0 状态
+            *vx_world = 0.0;
+            *vy_world = 0.0;
+            *vz_world = 0.0;
+            return;
+        }
+    }
+
+    // ---------------- 阶段 2：xy + z 移动，yaw 保持 ----------------
+    // XY
     const double dx = target.x_m - current_pos.x;
     const double dy = target.y_m - current_pos.y;
     const double d_xy = std::sqrt(dx * dx + dy * dy);
 
-    if (phase_ == Phase::PHASE_XY) {
-        const double v_stop_xy =
-            std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
-        const double v_p_xy = config_.kp_xy * d_xy;
-        const double xy_speed_target =
-            std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
+    const double v_stop_xy =
+        std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
+    const double v_p_xy = config_.kp_xy * d_xy;
+    const double xy_speed_target_mag =
+        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
 
-        double target_vx_world = 0.0;
-        double target_vy_world = 0.0;
-        if (d_xy > 1e-6) {
-            const double inv_d = 1.0 / d_xy;
-            target_vx_world = xy_speed_target * dx * inv_d;
-            target_vy_world = xy_speed_target * dy * inv_d;
-        }
-
-        *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
-        *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
-
-        if (d_xy <= config_.xy_arrival_tolerance_m) {
-            xy_vx_limiter_.Reset();
-            xy_vy_limiter_.Reset();
-            *vx_world = 0.0;
-            *vy_world = 0.0;
-            phase_ = Phase::PHASE_Z;
-        }
+    double target_vx_world = 0.0;
+    double target_vy_world = 0.0;
+    if (d_xy > 1e-6) {
+        const double inv_d = 1.0 / d_xy;
+        target_vx_world = xy_speed_target_mag * dx * inv_d;
+        target_vy_world = xy_speed_target_mag * dy * inv_d;
     }
+    *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
+    *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
 
-    // ---------------- Z ----------------
+    // Z
     const double dz = target.z_m - current_pos.z;
     const double abs_dz = std::fabs(dz);
 
-    if (phase_ == Phase::PHASE_XY || phase_ == Phase::PHASE_Z) {
-        const double v_stop_z =
-            std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
-        const double v_p_z = config_.kp_z * abs_dz;
-        const double z_speed_mag =
-            std::min({config_.z_speed_mps, v_stop_z, v_p_z});
-        const double z_speed_target = SignOf(dz) * z_speed_mag;
-        *vz_world = z_limiter_.Update(z_speed_target, dt);
-    }
+    const double v_stop_z =
+        std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
+    const double v_p_z = config_.kp_z * abs_dz;
+    const double z_speed_mag =
+        std::min({config_.z_speed_mps, v_stop_z, v_p_z});
+    const double z_speed_target = SignOf(dz) * z_speed_mag;
+    *vz_world = z_limiter_.Update(z_speed_target, dt);
 
-    if (phase_ == Phase::PHASE_Z && abs_dz <= config_.z_arrival_tolerance_m) {
+    // Yaw 保持：小 P，不用 v_stop（速度本身就很小，限幅器会处理）
+    const double v_p_yaw_hold = config_.kp_yaw_hold * abs_yaw_err;
+    const double yaw_hold_mag =
+        std::min(config_.yaw_speed_radps, v_p_yaw_hold);
+    const double yaw_hold_target = SignOf(yaw_err) * yaw_hold_mag;
+    *vyaw = yaw_limiter_.Update(yaw_hold_target, dt);
+
+    // 到达判定：基于 xy 与 z；是否需要 yaw 由 ignore_arrival_yaw 决定
+    const bool xy_ok = (d_xy <= config_.xy_arrival_tolerance_m);
+    const bool z_ok = (abs_dz <= config_.z_arrival_tolerance_m);
+    const bool yaw_ok = config_.ignore_arrival_yaw ||
+                        (abs_yaw_err <= config_.yaw_arrival_tolerance_rad);
+    if (xy_ok && z_ok && yaw_ok) {
+        // 到达：所有速度置零，限幅器全部 Reset
+        xy_vx_limiter_.Reset();
+        xy_vy_limiter_.Reset();
         z_limiter_.Reset();
-        *vz_world = 0.0;
-        phase_ = Phase::PHASE_YAW;
-    }
-
-    // ---------------- Yaw ----------------
-    const double yaw_err = NormalizeAngleRad(target.yaw_rad - current_yaw_rad);
-    const double abs_yaw_err = std::fabs(yaw_err);
-    const double v_stop_yaw =
-        std::sqrt(2.0 * config_.yaw_limits.a_max * abs_yaw_err);
-    const double v_p_yaw = config_.kp_yaw * abs_yaw_err;
-    const double yaw_speed_mag =
-        std::min({config_.yaw_speed_radps, v_stop_yaw, v_p_yaw});
-    const double yaw_speed_target = SignOf(yaw_err) * yaw_speed_mag;
-    *vyaw = yaw_limiter_.Update(yaw_speed_target, dt);
-
-    if (phase_ == Phase::PHASE_YAW && abs_yaw_err <= config_.yaw_arrival_tolerance_rad) {
         yaw_limiter_.Reset();
+        *vx_world = 0.0;
+        *vy_world = 0.0;
+        *vz_world = 0.0;
         *vyaw = 0.0;
         *arrived = true;
     }

@@ -1,8 +1,11 @@
 // 加载 YAML 航点文件，订阅实时里程计；
 // 通过定时器以预设巡航速度跟踪航点，输出经三阶限幅平滑后的速度指令到 /drone/cmd_vel。
 //
-// 中间航点采用 fly-through 策略（直通），仅最后一个航点启用预制动 v_stop = sqrt(2 a d)；
-// 到达判定要求 XY 距离、Z 距离、yaw 误差三项同时落入阈值内。
+// 每个航点采用两阶段流程：
+//   PHASE_ROTATE：原地用较大 P 增益把机头转到该航点的目标 yaw（xyz 速度恒为 0）
+//   PHASE_MOVE  ：同时收敛 XY 与 Z；yaw 用较小 P 增益保持，避免长距离漂航
+// 到达判定基于 XY/Z 容差；yaw 是否参与到达判定由 ignore_arrival_yaw 控制（默认 true）。
+// 到达后立即切换下一个航点并重置为 PHASE_ROTATE；若已是最后一个航点则进入 FINISHED 持续发零速。
 //
 // 坐标转换严格沿用 position_controller.hpp 的做法：
 //   - 误差与限幅在世界系 FLU 中计算
@@ -45,11 +48,10 @@ private:
         FINISHED,   // 已完成最后一个航点：发零速悬停
     };
 
-    // 每个航点的到达阶段（三阶段顺序判定，已达标不回退）
+    // 每个航点的两阶段顺序流程（已进入 MOVE 后不会回退到 ROTATE）
     enum class Phase {
-        PHASE_XY,   // 正在收敛 XY
-        PHASE_Z,    // XY 已达标，正在收敛 Z
-        PHASE_YAW,  // XY/Z 已达标，正在收敛 Yaw
+        PHASE_ROTATE,  // 阶段1：原地把 yaw 旋转到目标航点 yaw
+        PHASE_MOVE,    // 阶段2：xy 与 z 同时移动；yaw 小 P 保持目标 yaw
     };
 
     // 内存中的航点（位置 + yaw，单位米/弧度）
@@ -92,14 +94,17 @@ private:
         SmoothVelocityLimiter::Limits yaw_limits;
 
         // 位置 P 反馈增益
-        double kp_xy = 2.0;     // 1/s
-        double kp_z = 1.5;      // 1/s
-        double kp_yaw = 1.5;    // 1/s
+        double kp_xy = 2.0;           // 1/s, XY 误差
+        double kp_z = 1.5;            // 1/s, Z 误差
+        double kp_yaw_rotate = 3.0;   // 1/s, 阶段1（大 P，快速旋转到目标 yaw）
+        double kp_yaw_hold = 0.5;     // 1/s, 阶段2（小 P，移动中保持目标 yaw）
 
-        // 到达阈值
+        // 到达 / 切换阈值
         double xy_arrival_tolerance_m = 0.15;
         double z_arrival_tolerance_m = 0.15;
-        double yaw_arrival_tolerance_rad = 0.0;  // 由 deg 转换
+        double yaw_rotation_tolerance_rad = 0.0;  // 阶段1→阶段2 阈值（由 deg 转换）
+        double yaw_arrival_tolerance_rad = 0.0;   // 到达 yaw 容差（由 deg 转换）
+        bool ignore_arrival_yaw = true;           // 到达判定是否忽略 yaw
     };
 
     // 初始化流程
@@ -184,7 +189,7 @@ private:
 
     // 状态机
     State state_ = State::IDLE;
-    Phase phase_ = Phase::PHASE_XY;
+    Phase phase_ = Phase::PHASE_ROTATE;
 
     // 限幅器：XY 在世界系下分两个轴跑独立限幅器，
     // 这样航点切换时方向跳变可被限幅器自然处理为平滑过渡（即"切弯"）。
