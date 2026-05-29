@@ -1,21 +1,13 @@
 # indooruav_waypoint recorded waypoints
-# generated_at: 2026-05-14 10:28:51
-# count: 11
+# generated_at: 2026-05-29 16:39:38
+# count: 8
 # fields: x [m], y [m], z [m], yaw_deg [deg]
 waypoints:
-  - {x: 0, y: 0, z: 2, yaw_deg: 0}
-  - {x: 1, y: 0, z: 2, yaw_deg: 0}
-  - {x: 2, y: 0, z: 2, yaw_deg: 0}
-  - {x: 3, y: 0, z: 2, yaw_deg: 0}
-  - {x: 3, y: 0, z: 2, yaw_deg: -90}
-  - {x: 3, y: -1, z: 2, yaw_deg: -90}
-  - {x: 3, y: -2, z: 2, yaw_deg: -90}
-  - {x: 3, y: -2, z: 2, yaw_deg: -180}
-  - {x: 2, y: -2, z: 2, yaw_deg: -180}
-  - {x: 1, y: -2, z: 2, yaw_deg: -180}
-  - {x: 0, y: -2, z: 2, yaw_deg: -180}
-  - {x: 0, y: -2, z: 2, yaw_deg: 90}
-  - {x: 0, y: -1, z: 2, yaw_deg: 90}
-  - {x: 0, y: 0, z: 2, yaw_deg: 90}
-  - {x: 0, y: 0, z: 2, yaw_deg: 0}
-
+  - {x: 0.481, y: 0.002, z: 1.094, yaw_deg: -0.7}
+  - {x: 4.875, y: -0.085, z: 1.140, yaw_deg: -0.4}
+  - {x: 4.747, y: -0.199, z: 1.139, yaw_deg: -93.9}
+  - {x: 4.633, y: -1.693, z: 1.133, yaw_deg: -93.6}
+  - {x: 4.533, y: -1.576, z: 1.115, yaw_deg: 172.4}
+  - {x: 0.439, y: -0.973, z: 1.070, yaw_deg: 172.4}
+  - {x: 0.689, y: -0.996, z: 1.142, yaw_deg: -4.4}
+  - {x: 0.676, y: -0.154, z: 1.127, yaw_deg: -4.5}

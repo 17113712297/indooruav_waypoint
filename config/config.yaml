@@ -11,7 +11,7 @@ indooruav_waypoint:
     # ----- 话题 -----
     topics:
       # 订阅的实时里程计话题（与 position_controller 保持一致）
-      current_odometry: /Odometry_global_rotate
+      current_odometry: /Odometry_global
       # 发布的目标里程计话题（当前正在追踪的航点，阶跃信号，用于可视化/调试）
       desired_odometry: indooruav_controller/waypoint_tracker/odom_goal
       # 发布的速度指令话题
@@ -99,7 +99,7 @@ indooruav_waypoint:
     # ----- 话题 -----
     topics:
       # 与 tracker 订阅同一个话题，确保坐标系一致
-      current_odometry: /Odometry_global_rotate
+      current_odometry: /Odometry_global
 
     # ----- 服务 -----
     services:
