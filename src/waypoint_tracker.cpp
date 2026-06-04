@@ -511,6 +511,14 @@ void WaypointTracker::ControlTimerCallback(const ros::TimerEvent& event) {
 }
 
 void WaypointTracker::CruiseCompleteTimerCallback(const ros::TimerEvent&) {
+    // 先自重置：回到 IDLE + 航点索引归零
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        EnterIdleLocked();
+        current_index_ = 0;
+        ROS_INFO("[WaypointTracker] Self-reset to IDLE after cruise complete.");
+    }
+
     std_srvs::Empty srv;
     if (!cruise_complete_client_.call(srv)) {
         ROS_WARN("[WaypointTracker] Failed to call cruise_complete event service: %s",
