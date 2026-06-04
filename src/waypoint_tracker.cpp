@@ -105,6 +105,9 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<std::string>(p + "services/stop",
                            config_.stop_service_name,
                            std::string("indooruav_controller/waypoint_tracker/stop"));
+    nh_.param<std::string>(p + "services/cruise_complete",
+                           config_.cruise_complete_service_name,
+                           std::string("indooruav_core/state_machine_event/cruise_complete"));
 
     // file
     nh_.param<std::string>(p + "waypoints_package_name",
@@ -343,6 +346,15 @@ void WaypointTracker::SetupRosInterfaces() {
         config_.stop_service_name,
         &WaypointTracker::StopServiceCallback, this);
 
+    cruise_complete_client_ = nh_.serviceClient<std_srvs::Empty>(
+        config_.cruise_complete_service_name);
+
+    cruise_complete_timer_ = nh_.createTimer(
+        ros::Duration(0.001),
+        &WaypointTracker::CruiseCompleteTimerCallback,
+        this, true /* oneshot */);
+    cruise_complete_timer_.stop();
+
     control_timer_ = nh_.createTimer(
         ros::Duration(1.0 / config_.control_rate_hz),
         &WaypointTracker::ControlTimerCallback, this);
@@ -360,94 +372,81 @@ void WaypointTracker::OdometryCallback(const nav_msgs::Odometry::ConstPtr& msg) 
 // 服务回调
 // =============================================================================
 
-bool WaypointTracker::StartServiceCallback(std_srvs::Trigger::Request& req,
-                                           std_srvs::Trigger::Response& res) {
+bool WaypointTracker::StartServiceCallback(std_srvs::Empty::Request& req,
+                                           std_srvs::Empty::Response& res) {
     (void)req;
+    (void)res;
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_ || waypoints_.empty()) {
-        res.success = false;
-        res.message = "Tracker not initialized or waypoint list is empty.";
+        ROS_WARN("[WaypointTracker] Start rejected: not initialized or no waypoints.");
         return true;
     }
 
     if (!has_odometry_) {
-        res.success = false;
-        res.message = "No odometry received yet on " +
-                      config_.current_odometry_topic;
+        ROS_WARN("[WaypointTracker] Start rejected: no odometry received yet on %s",
+                 config_.current_odometry_topic.c_str());
         return true;
     }
 
     switch (state_) {
         case State::RUNNING:
-            res.success = true;
-            res.message = "Already RUNNING, no change.";
+            ROS_INFO("[WaypointTracker] Already RUNNING, no change.");
             return true;
         case State::PAUSED:
             EnterRunningLocked();
-            res.success = true;
-            res.message = "Resumed from PAUSED at index " +
-                          std::to_string(current_index_);
-            ROS_INFO_STREAM("[WaypointTracker] " << res.message);
+            ROS_INFO_STREAM("[WaypointTracker] Resumed from PAUSED at index "
+                            << current_index_);
             return true;
         case State::FINISHED:
             current_index_ = 0;
             EnterRunningLocked();
-            res.success = true;
-            res.message = "Restarted from index 0 (was FINISHED).";
-            ROS_INFO_STREAM("[WaypointTracker] " << res.message);
+            ROS_INFO("[WaypointTracker] Restarted from index 0 (was FINISHED).");
             return true;
         case State::IDLE:
         default:
             current_index_ = 0;
             EnterRunningLocked();
-            res.success = true;
-            res.message = "Started from index 0.";
-            ROS_INFO_STREAM("[WaypointTracker] " << res.message);
+            ROS_INFO("[WaypointTracker] Started from index 0.");
             return true;
     }
 }
 
-bool WaypointTracker::PauseServiceCallback(std_srvs::Trigger::Request& req,
-                                           std_srvs::Trigger::Response& res) {
+bool WaypointTracker::PauseServiceCallback(std_srvs::Empty::Request& req,
+                                           std_srvs::Empty::Response& res) {
     (void)req;
+    (void)res;
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        res.success = false;
-        res.message = "Tracker not initialized.";
+        ROS_WARN("[WaypointTracker] Pause rejected: not initialized.");
         return true;
     }
 
     if (state_ == State::PAUSED) {
-        res.success = true;
-        res.message = "Already PAUSED.";
+        ROS_INFO("[WaypointTracker] Already PAUSED.");
         return true;
     }
 
     EnterPausedLocked();
-    res.success = true;
-    res.message = "Paused at index " + std::to_string(current_index_);
-    ROS_INFO_STREAM("[WaypointTracker] " << res.message);
+    ROS_INFO_STREAM("[WaypointTracker] Paused at index " << current_index_);
     return true;
 }
 
-bool WaypointTracker::StopServiceCallback(std_srvs::Trigger::Request& req,
-                                          std_srvs::Trigger::Response& res) {
+bool WaypointTracker::StopServiceCallback(std_srvs::Empty::Request& req,
+                                          std_srvs::Empty::Response& res) {
     (void)req;
+    (void)res;
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!initialized_) {
-        res.success = false;
-        res.message = "Tracker not initialized.";
+        ROS_WARN("[WaypointTracker] Stop rejected: not initialized.");
         return true;
     }
 
     EnterIdleLocked();
     current_index_ = 0;
-    res.success = true;
-    res.message = "Stopped and reset to index 0.";
-    ROS_INFO_STREAM("[WaypointTracker] " << res.message);
+    ROS_INFO("[WaypointTracker] Stopped and reset to index 0.");
     return true;
 }
 
@@ -503,6 +502,23 @@ void WaypointTracker::ControlTimerCallback(const ros::TimerEvent& event) {
         return;
     }
     RunControlStep(ros::Time::now());
+
+    // 锁外：检查巡航完成标志，触发 oneshot timer
+    if (cruise_complete_pending_) {
+        cruise_complete_pending_ = false;
+        cruise_complete_timer_.start();
+    }
+}
+
+void WaypointTracker::CruiseCompleteTimerCallback(const ros::TimerEvent&) {
+    std_srvs::Empty srv;
+    if (!cruise_complete_client_.call(srv)) {
+        ROS_WARN("[WaypointTracker] Failed to call cruise_complete event service: %s",
+                 config_.cruise_complete_service_name.c_str());
+        return;
+    }
+    ROS_INFO("[WaypointTracker] Called cruise_complete event service: %s",
+             config_.cruise_complete_service_name.c_str());
 }
 
 void WaypointTracker::RunControlStep(const ros::Time& now) {
@@ -524,6 +540,10 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
             publish_cmd = true;
             // 发布期望里程计（当前目标航点），方便 RViz 观察
             publish_desired_step = !waypoints_.empty();
+            // 检测 FINISHED 状态，设置巡航完成标志
+            if (state_ == State::FINISHED && !cruise_complete_pending_) {
+                cruise_complete_pending_ = true;
+            }
         } else {
             // RUNNING：执行追踪逻辑
 

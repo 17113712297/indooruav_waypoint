@@ -25,6 +25,7 @@ indooruav_waypoint:
       pause: indooruav_controller/waypoint_tracker/pause
       # 关闭追踪并复位（航点索引归零）
       stop: indooruav_controller/waypoint_tracker/stop
+      cruise_complete: indooruav_core/state_machine_event/cruise_complete
 
     # ----- 航点文件路径 -----
     # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
@@ -38,7 +39,7 @@ indooruav_waypoint:
       # 实时里程计超时阈值，超过则发送一次零速指令并将限幅器清零
       odometry_timeout_s: 0.2
       # 节点启动后是否自动进入 RUNNING 状态。false 时需手动调用 start 服务
-      autostart: true
+      autostart: false
 
       # 巡航速度（速度上限，同时也是限幅器 v_max）
       xy_speed_mps: 0.5    # XY 合速度

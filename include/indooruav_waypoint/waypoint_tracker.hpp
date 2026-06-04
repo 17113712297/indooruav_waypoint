@@ -24,7 +24,7 @@
 #include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
-#include <std_srvs/Trigger.h>
+#include <std_srvs/Empty.h>
 
 #include "indooruav_waypoint/smooth_velocity_limiter.hpp"
 
@@ -73,6 +73,7 @@ private:
         std::string start_service_name;
         std::string pause_service_name;
         std::string stop_service_name;
+        std::string cruise_complete_service_name;
 
         // file
         std::string waypoints_package_name;
@@ -116,13 +117,14 @@ private:
     // ROS 回调
     void OdometryCallback(const nav_msgs::Odometry::ConstPtr& msg);
     void ControlTimerCallback(const ros::TimerEvent& event);
+    void CruiseCompleteTimerCallback(const ros::TimerEvent& event);
 
-    bool StartServiceCallback(std_srvs::Trigger::Request& req,
-                              std_srvs::Trigger::Response& res);
-    bool PauseServiceCallback(std_srvs::Trigger::Request& req,
-                              std_srvs::Trigger::Response& res);
-    bool StopServiceCallback(std_srvs::Trigger::Request& req,
-                             std_srvs::Trigger::Response& res);
+    bool StartServiceCallback(std_srvs::Empty::Request& req,
+                              std_srvs::Empty::Response& res);
+    bool PauseServiceCallback(std_srvs::Empty::Request& req,
+                              std_srvs::Empty::Response& res);
+    bool StopServiceCallback(std_srvs::Empty::Request& req,
+                             std_srvs::Empty::Response& res);
 
     // 控制核心
     void RunControlStep(const ros::Time& now);
@@ -171,6 +173,9 @@ private:
     ros::ServiceServer pause_service_;
     ros::ServiceServer stop_service_;
     ros::Timer control_timer_;
+    ros::Timer cruise_complete_timer_;
+    ros::ServiceClient cruise_complete_client_;
+    bool cruise_complete_pending_ = false;
 
     // 配置
     Config config_;
