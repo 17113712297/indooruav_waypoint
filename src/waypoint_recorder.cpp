@@ -49,8 +49,15 @@ WaypointRecorder::WaypointRecorder()
             "(load_existing=false).");
     }
 
-    ROS_INFO_STREAM("[WaypointRecorder] subscribing odometry from: "
-                    << config_.current_odometry_topic);
+    if (config_.mode == "path_relay") {
+        ROS_INFO_STREAM("[WaypointRecorder] mode=path_relay, subscribing path from: "
+                        << config_.global_path_topic
+                        << ", publishing odometry to: "
+                        << config_.odometry_path_topic);
+    } else {
+        ROS_INFO_STREAM("[WaypointRecorder] mode=direct, subscribing odometry from: "
+                        << config_.current_odometry_topic);
+    }
     ROS_INFO_STREAM("[WaypointRecorder] services: record="
                     << config_.record_service_name
                     << ", save=" << config_.save_service_name
@@ -67,9 +74,19 @@ void WaypointRecorder::LoadParameters(ros::NodeHandle& pnh) {
     (void)pnh;  // 全部参数走绝对路径，从全局命名空间读取
     const std::string p = "/indooruav_waypoint/waypoint_recorder/";
 
+    nh_.param<std::string>(p + "mode",
+                           config_.mode,
+                           std::string("direct"));
+
     nh_.param<std::string>(p + "topics/current_odometry",
                            config_.current_odometry_topic,
                            std::string("/Odometry_global_rotate"));
+    nh_.param<std::string>(p + "topics/global_path",
+                           config_.global_path_topic,
+                           std::string("/global_path"));
+    nh_.param<std::string>(p + "topics/odometry_path",
+                           config_.odometry_path_topic,
+                           std::string("/Odometry_path"));
 
     nh_.param<std::string>(p + "services/record",
                            config_.record_service_name,
@@ -97,9 +114,17 @@ void WaypointRecorder::LoadParameters(ros::NodeHandle& pnh) {
 // =============================================================================
 
 void WaypointRecorder::SetupRosInterfaces() {
-    odometry_subscriber_ = nh_.subscribe(
-        config_.current_odometry_topic, 20,
-        &WaypointRecorder::OdometryCallback, this);
+    if (config_.mode == "path_relay") {
+        global_path_subscriber_ = nh_.subscribe(
+            config_.global_path_topic, 20,
+            &WaypointRecorder::GlobalPathCallback, this);
+        odometry_path_publisher_ = nh_.advertise<nav_msgs::Odometry>(
+            config_.odometry_path_topic, 20);
+    } else {
+        odometry_subscriber_ = nh_.subscribe(
+            config_.current_odometry_topic, 20,
+            &WaypointRecorder::OdometryCallback, this);
+    }
 
     record_service_ = nh_.advertiseService(
         config_.record_service_name,
@@ -116,6 +141,27 @@ void WaypointRecorder::OdometryCallback(
     const nav_msgs::Odometry::ConstPtr& msg) {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_odometry_ = *msg;
+    has_odometry_ = true;
+}
+
+void WaypointRecorder::GlobalPathCallback(
+    const nav_msgs::Path::ConstPtr& msg) {
+    if (msg->poses.empty()) {
+        return;
+    }
+
+    const auto& last_pose = msg->poses.back();
+
+    nav_msgs::Odometry odom;
+    odom.header.stamp = last_pose.header.stamp;
+    odom.header.frame_id = msg->header.frame_id;
+    odom.child_frame_id = "body";
+    odom.pose.pose = last_pose.pose;
+
+    odometry_path_publisher_.publish(odom);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_odometry_ = odom;
     has_odometry_ = true;
 }
 
@@ -170,9 +216,10 @@ bool WaypointRecorder::RecordServiceCallback(
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (!has_odometry_) {
+        const std::string source = (config_.mode == "path_relay")
+            ? config_.global_path_topic : config_.current_odometry_topic;
         res.success = false;
-        res.message = "No odometry received yet on " +
-                      config_.current_odometry_topic;
+        res.message = "No odometry received yet from " + source;
         ROS_WARN_STREAM("[WaypointRecorder] " << res.message);
         return true;
     }

@@ -1,8 +1,11 @@
 <?xml version="1.0"?>
 <launch>
   <!--
-    启动 waypoint_recorder_node：订阅实时里程计，通过 std_srvs/Trigger 服务接收人工触发，
-    把当前位置追加为航点，触发 save 后整文件覆盖写入 YAML。
+    启动 waypoint_recorder_node。
+
+    模式（arg mode）：
+      direct     直接订阅里程计话题（默认）
+      path_relay 订阅 /global_path 转发为 Odometry 后记录
 
     服务调用示例：
       rosservice call indooruav_controller/waypoint_recorder/record "{}"
@@ -12,8 +15,12 @@
 
   <arg name="config_file"
        default="$(find indooruav_waypoint)/config/config.yaml"/>
+  <arg name="mode" default="direct"/>
 
   <rosparam command="load" file="$(arg config_file)"/>
+
+  <!-- 覆盖 config.yaml 中的 mode，确保命令行参数优先生效 -->
+  <param name="/indooruav_waypoint/waypoint_recorder/mode" value="$(arg mode)"/>
 
   <node pkg="indooruav_waypoint"
         type="waypoint_recorder_node"

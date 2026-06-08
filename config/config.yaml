@@ -97,10 +97,19 @@ indooruav_waypoint:
   # ============================================================
   waypoint_recorder:
 
+    # ----- 工作模式 -----
+    # "direct"     直接订阅里程计话题（默认）
+    # "path_relay" 订阅 /global_path 路径，取最新帧转为 Odometry 发布到 odometry_path 话题
+    mode: direct
+
     # ----- 话题 -----
     topics:
-      # 与 tracker 订阅同一个话题，确保坐标系一致
+      # mode=direct 时订阅的里程计话题（与 tracker 订阅同一个话题，确保坐标系一致）
       current_odometry: /Odometry_global
+      # mode=path_relay 时订阅的全局路径话题
+      global_path: /global_path
+      # mode=path_relay 时将路径转为 Odometry 发布到该话题
+      odometry_path: /Odometry_path
 
     # ----- 服务 -----
     services:

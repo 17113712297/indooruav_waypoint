@@ -14,6 +14,7 @@
 
 #include <geometry_msgs/Quaternion.h>
 #include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
 #include <ros/ros.h>
 #include <std_srvs/Trigger.h>
 
@@ -36,7 +37,10 @@ private:
     };
 
     struct Config {
+        std::string mode;  // "direct" or "path_relay"
         std::string current_odometry_topic;
+        std::string global_path_topic;
+        std::string odometry_path_topic;
         std::string record_service_name;
         std::string save_service_name;
         std::string clear_service_name;
@@ -53,6 +57,7 @@ private:
     bool SaveWaypointsToFile(std::string* error_message);
 
     void OdometryCallback(const nav_msgs::Odometry::ConstPtr& msg);
+    void GlobalPathCallback(const nav_msgs::Path::ConstPtr& msg);
 
     bool RecordServiceCallback(std_srvs::Trigger::Request& req,
                                std_srvs::Trigger::Response& res);
@@ -70,6 +75,8 @@ private:
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
     ros::Subscriber odometry_subscriber_;
+    ros::Subscriber global_path_subscriber_;
+    ros::Publisher odometry_path_publisher_;
     ros::ServiceServer record_service_;
     ros::ServiceServer save_service_;
     ros::ServiceServer clear_service_;
