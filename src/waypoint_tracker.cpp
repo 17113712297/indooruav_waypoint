@@ -753,16 +753,22 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
     *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
 
-    // Z
+    // Z — 与 XY 进度同步，保证 Z 和 XY 同时到达目标航点
     const double dz = target.z_m - current_pos.z;
     const double abs_dz = std::fabs(dz);
 
-    const double v_stop_z =
-        std::sqrt(2.0 * config_.z_limits.a_max * abs_dz);
-    const double v_p_z = config_.kp_z * abs_dz;
-    const double z_speed_mag =
-        std::min({config_.z_speed_mps, v_stop_z, v_p_z});
-    const double z_speed_target = SignOf(dz) * z_speed_mag;
+    double z_speed_target = 0.0;
+    if (d_xy > 1e-6) {
+        // vz = v_xy * (dz / d_xy)，Z 按 XY 进度比例推进
+        const double z_speed_synced = xy_speed_target_mag * (dz / d_xy);
+        z_speed_target = std::max(-config_.z_speed_mps,
+                                  std::min(z_speed_synced, config_.z_speed_mps));
+    } else {
+        // XY 已到位，Z 用 P 控制独立收敛兜底
+        const double v_p_z = config_.kp_z * abs_dz;
+        const double z_speed_mag = std::min(config_.z_speed_mps, v_p_z);
+        z_speed_target = SignOf(dz) * z_speed_mag;
+    }
     *vz_world = z_limiter_.Update(z_speed_target, dt);
 
     // Yaw 保持：小 P，不用 v_stop（速度本身就很小，限幅器会处理）
