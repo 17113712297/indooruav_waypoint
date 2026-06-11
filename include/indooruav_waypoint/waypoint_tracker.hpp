@@ -15,6 +15,7 @@
 #ifndef INDOORUAV_WAYPOINT_WAYPOINT_TRACKER_HPP_
 #define INDOORUAV_WAYPOINT_WAYPOINT_TRACKER_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <mutex>
 #include <string>
@@ -175,7 +176,9 @@ private:
     ros::Timer control_timer_;
     ros::Timer cruise_complete_timer_;
     ros::ServiceClient cruise_complete_client_;
-    bool cruise_complete_pending_ = false;
+    std::atomic<bool> cruise_complete_pending_{false};
+    int cruise_complete_retry_count_ = 0;
+    static constexpr int kMaxCruiseCompleteRetries = 5;
 
     // 配置
     Config config_;

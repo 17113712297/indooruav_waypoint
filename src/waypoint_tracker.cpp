@@ -511,22 +511,53 @@ void WaypointTracker::ControlTimerCallback(const ros::TimerEvent& event) {
 }
 
 void WaypointTracker::CruiseCompleteTimerCallback(const ros::TimerEvent&) {
-    // 先自重置：回到 IDLE + 航点索引归零
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        EnterIdleLocked();
-        current_index_ = 0;
-        ROS_INFO("[WaypointTracker] Self-reset to IDLE after cruise complete.");
+    // [锁外] 等待服务就绪 + 调用，避免阻塞其他回调
+    if (!cruise_complete_client_.waitForExistence(ros::Duration(2.0))) {
+        ++cruise_complete_retry_count_;
+        if (cruise_complete_retry_count_ >= kMaxCruiseCompleteRetries) {
+            ROS_ERROR("[WaypointTracker] cruise_complete service unavailable after %d retries, giving up.",
+                      cruise_complete_retry_count_);
+            cruise_complete_retry_count_ = 0;
+            // 仍然重置 tracker 状态，避免节点卡死
+            std::lock_guard<std::mutex> lock(mutex_);
+            EnterIdleLocked();
+            current_index_ = 0;
+            return;
+        }
+        ROS_WARN_THROTTLE(1.0,
+            "[WaypointTracker] cruise_complete service not available, retry %d/%d...",
+            cruise_complete_retry_count_, kMaxCruiseCompleteRetries);
+        cruise_complete_pending_ = true;  // 触发下一个 tick 重试
+        return;
     }
 
     std_srvs::Empty srv;
     if (!cruise_complete_client_.call(srv)) {
-        ROS_WARN("[WaypointTracker] Failed to call cruise_complete event service: %s",
-                 config_.cruise_complete_service_name.c_str());
+        ++cruise_complete_retry_count_;
+        if (cruise_complete_retry_count_ >= kMaxCruiseCompleteRetries) {
+            ROS_ERROR("[WaypointTracker] cruise_complete service call failed after %d retries, giving up.",
+                      cruise_complete_retry_count_);
+            cruise_complete_retry_count_ = 0;
+            std::lock_guard<std::mutex> lock(mutex_);
+            EnterIdleLocked();
+            current_index_ = 0;
+            return;
+        }
+        ROS_WARN_THROTTLE(1.0,
+            "[WaypointTracker] cruise_complete service call failed, retry %d/%d...",
+            cruise_complete_retry_count_, kMaxCruiseCompleteRetries);
+        cruise_complete_pending_ = true;  // 触发下一个 tick 重试
         return;
     }
-    ROS_INFO("[WaypointTracker] Called cruise_complete event service: %s",
-             config_.cruise_complete_service_name.c_str());
+
+    // [锁内] 服务调用成功，重置 tracker 状态
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        EnterIdleLocked();
+        current_index_ = 0;
+        ROS_INFO("[WaypointTracker] Called cruise_complete event service successfully. Self-reset to IDLE.");
+    }
+    cruise_complete_retry_count_ = 0;
 }
 
 void WaypointTracker::RunControlStep(const ros::Time& now) {
