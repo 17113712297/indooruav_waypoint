@@ -10,13 +10,14 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   geometry_msgs
   nav_msgs
+  indooruav_msgs
 )
 
 find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS roscpp roslib std_srvs std_msgs geometry_msgs nav_msgs
+  CATKIN_DEPENDS roscpp roslib std_srvs std_msgs geometry_msgs nav_msgs indooruav_msgs
 )
 
 include_directories(

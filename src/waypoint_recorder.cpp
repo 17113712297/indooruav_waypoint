@@ -14,6 +14,7 @@
 #include <sys/types.h>
 
 #include <ros/package.h>
+#include <indooruav_msgs/SetFilePath.h>
 #include <yaml-cpp/yaml.h>
 
 namespace indooruav_waypoint {
@@ -135,6 +136,9 @@ void WaypointRecorder::SetupRosInterfaces() {
     clear_service_ = nh_.advertiseService(
         config_.clear_service_name,
         &WaypointRecorder::ClearServiceCallback, this);
+    set_file_path_service_ = nh_.advertiseService(
+        "indooruav_controller/waypoint_recorder/set_file_path",
+        &WaypointRecorder::SetFilePathCallback, this);
 }
 
 void WaypointRecorder::OdometryCallback(
@@ -281,6 +285,24 @@ bool WaypointRecorder::ClearServiceCallback(
         << " entries; file unchanged).";
     res.success = true;
     res.message = oss.str();
+    ROS_INFO_STREAM("[WaypointRecorder] " << res.message);
+    return true;
+}
+
+bool WaypointRecorder::SetFilePathCallback(
+    indooruav_msgs::SetFilePath::Request& req,
+    indooruav_msgs::SetFilePath::Response& res) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (req.file_path.empty()) {
+        res.success = false;
+        res.message = "file_path is empty.";
+        return true;
+    }
+
+    config_.waypoints_file_path = req.file_path;
+    res.success = true;
+    res.message = "waypoints_file_path set to: " + req.file_path;
     ROS_INFO_STREAM("[WaypointRecorder] " << res.message);
     return true;
 }
