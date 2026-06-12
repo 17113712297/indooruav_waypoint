@@ -319,10 +319,22 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
         ROS_WARN_STREAM("[WaypointTracker] Waypoint list is empty in: "
                         << resolved_path);
     } else {
-        // 最后一个航点强制为停留点
-        if (!waypoints_.back().stop) {
+        // 截掉最后一个停留点之后的穿越点
+        int last_stop = -1;
+        for (int i = static_cast<int>(waypoints_.size()) - 1; i >= 0; --i) {
+            if (waypoints_[i].stop) {
+                last_stop = i;
+                break;
+            }
+        }
+        if (last_stop < 0) {
+            ROS_WARN("[WaypointTracker] No stop waypoint found, forcing last one.");
             waypoints_.back().stop = true;
-            ROS_INFO("[WaypointTracker] Last waypoint forced to stop=true.");
+        } else if (last_stop + 1 < static_cast<int>(waypoints_.size())) {
+            const std::size_t removed = waypoints_.size() - (last_stop + 1);
+            waypoints_.resize(last_stop + 1);
+            ROS_INFO("[WaypointTracker] Trimmed %zu pass-through waypoints after last stop.",
+                     removed);
         }
         ROS_INFO_STREAM("[WaypointTracker] Loaded " << waypoints_.size()
                         << " waypoints from " << resolved_path);
@@ -793,7 +805,7 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     // ---------------- 阶段 2：xy + z 移动，yaw 保持 ----------------
     const bool is_stop = target.stop;
 
-    // XY
+    // XY — 所有航点逻辑一致
     const double dx = target.x_m - current_pos.x;
     const double dy = target.y_m - current_pos.y;
     const double d_xy = std::sqrt(dx * dx + dy * dy);
@@ -801,10 +813,8 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const double v_stop_xy =
         std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
     const double v_p_xy = config_.kp_xy * d_xy;
-    // 停留点：末端减速；穿越点：全程巡航速度
-    const double xy_speed_target_mag = is_stop
-        ? std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy})
-        : config_.xy_speed_mps;
+    const double xy_speed_target_mag =
+        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
 
     double target_vx_world = 0.0;
     double target_vy_world = 0.0;
@@ -816,25 +826,30 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     *vx_world = xy_vx_limiter_.Update(target_vx_world, dt);
     *vy_world = xy_vy_limiter_.Update(target_vy_world, dt);
 
-    // Z — 与 XY 进度同步，保证 Z 和 XY 同时到达目标航点
+    // Z — 停留点与 XY 同步，穿越点仅 P 控制趋势
     const double dz = target.z_m - current_pos.z;
     const double abs_dz = std::fabs(dz);
 
     double z_speed_target = 0.0;
-    if (d_xy > 1e-6) {
-        // vz = v_xy * (dz / d_xy)，Z 按 XY 进度比例推进
-        const double z_speed_synced = xy_speed_target_mag * (dz / d_xy);
-        z_speed_target = std::max(-config_.z_speed_mps,
-                                  std::min(z_speed_synced, config_.z_speed_mps));
+    if (is_stop) {
+        if (d_xy > 1e-6) {
+            const double z_speed_synced = xy_speed_target_mag * (dz / d_xy);
+            z_speed_target = std::max(-config_.z_speed_mps,
+                                      std::min(z_speed_synced, config_.z_speed_mps));
+        } else {
+            const double v_p_z = config_.kp_z * abs_dz;
+            const double z_speed_mag = std::min(config_.z_speed_mps, v_p_z);
+            z_speed_target = SignOf(dz) * z_speed_mag;
+        }
     } else {
-        // XY 已到位，Z 用 P 控制独立收敛兜底
+        // 穿越点：独立 P 控制，不依赖 XY 进度
         const double v_p_z = config_.kp_z * abs_dz;
         const double z_speed_mag = std::min(config_.z_speed_mps, v_p_z);
         z_speed_target = SignOf(dz) * z_speed_mag;
     }
     *vz_world = z_limiter_.Update(z_speed_target, dt);
 
-    // Yaw 保持：小 P，不用 v_stop（速度本身就很小，限幅器会处理）
+    // Yaw 保持：所有航点一致
     const double v_p_yaw_hold = config_.kp_yaw_hold * abs_yaw_err;
     const double yaw_hold_mag =
         std::min(config_.yaw_speed_radps, v_p_yaw_hold);
