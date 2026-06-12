@@ -810,11 +810,13 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const double dy = target.y_m - current_pos.y;
     const double d_xy = std::sqrt(dx * dx + dy * dy);
 
+    // 停留点：末端减速；穿越点：全程巡航速度
     const double v_stop_xy =
         std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
     const double v_p_xy = config_.kp_xy * d_xy;
-    const double xy_speed_target_mag =
-        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
+    const double xy_speed_target_mag = is_stop
+        ? std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy})
+        : config_.xy_speed_mps;
 
     double target_vx_world = 0.0;
     double target_vy_world = 0.0;
