@@ -13,7 +13,6 @@
 #include <vector>
 
 #include <geometry_msgs/Quaternion.h>
-#include <indooruav_msgs/SetFilePath.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <ros/ros.h>
@@ -66,8 +65,6 @@ private:
                              std_srvs::Trigger::Response& res);
     bool ClearServiceCallback(std_srvs::Trigger::Request& req,
                               std_srvs::Trigger::Response& res);
-    bool SetFilePathCallback(indooruav_msgs::SetFilePath::Request& req,
-                             indooruav_msgs::SetFilePath::Response& res);
 
     static double GetYawFromQuaternion(const geometry_msgs::Quaternion& q);
     static double RadToDeg(double rad);
@@ -83,7 +80,6 @@ private:
     ros::ServiceServer record_service_;
     ros::ServiceServer save_service_;
     ros::ServiceServer clear_service_;
-    ros::ServiceServer set_file_path_service_;
 
     Config config_;
     std::mutex mutex_;
