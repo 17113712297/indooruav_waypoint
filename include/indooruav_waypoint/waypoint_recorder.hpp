@@ -34,6 +34,7 @@ private:
         double y_m = 0.0;
         double z_m = 0.0;
         double yaw_deg = 0.0;  // 文件以度存储，这里直接保存度
+        bool stop = false;     // true=停留点, false=穿越点
     };
 
     struct Config {
@@ -44,9 +45,12 @@ private:
         std::string record_service_name;
         std::string save_service_name;
         std::string clear_service_name;
+        std::string auto_record_start_service_name;
+        std::string auto_record_stop_service_name;
         std::string waypoints_package_name;
         std::string waypoints_file_path;
         bool load_existing = false;
+        double auto_record_interval_s = 3.0;
     };
 
     void LoadParameters(ros::NodeHandle& pnh);
@@ -65,6 +69,11 @@ private:
                              std_srvs::Trigger::Response& res);
     bool ClearServiceCallback(std_srvs::Trigger::Request& req,
                               std_srvs::Trigger::Response& res);
+    bool AutoRecordStartServiceCallback(std_srvs::Trigger::Request& req,
+                                        std_srvs::Trigger::Response& res);
+    bool AutoRecordStopServiceCallback(std_srvs::Trigger::Request& req,
+                                       std_srvs::Trigger::Response& res);
+    void AutoRecordTimerCallback(const ros::TimerEvent& event);
 
     static double GetYawFromQuaternion(const geometry_msgs::Quaternion& q);
     static double RadToDeg(double rad);
@@ -80,12 +89,16 @@ private:
     ros::ServiceServer record_service_;
     ros::ServiceServer save_service_;
     ros::ServiceServer clear_service_;
+    ros::ServiceServer auto_record_start_service_;
+    ros::ServiceServer auto_record_stop_service_;
+    ros::Timer auto_record_timer_;
 
     Config config_;
     std::mutex mutex_;
     std::vector<Waypoint> waypoints_;
     nav_msgs::Odometry latest_odometry_;
     bool has_odometry_ = false;
+    bool auto_recording_active_ = false;
 };
 
 }  // namespace indooruav_waypoint

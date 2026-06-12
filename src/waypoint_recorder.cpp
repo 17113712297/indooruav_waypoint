@@ -97,6 +97,12 @@ void WaypointRecorder::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<std::string>(p + "services/clear",
                            config_.clear_service_name,
                            std::string("indooruav_controller/waypoint_recorder/clear"));
+    nh_.param<std::string>(p + "services/auto_record_start",
+                           config_.auto_record_start_service_name,
+                           std::string("indooruav_controller/waypoint_recorder/auto_record_start"));
+    nh_.param<std::string>(p + "services/auto_record_stop",
+                           config_.auto_record_stop_service_name,
+                           std::string("indooruav_controller/waypoint_recorder/auto_record_stop"));
 
     nh_.param<std::string>(p + "waypoints_package_name",
                            config_.waypoints_package_name,
@@ -107,6 +113,9 @@ void WaypointRecorder::LoadParameters(ros::NodeHandle& pnh) {
 
     nh_.param<bool>(p + "parameters/load_existing",
                     config_.load_existing, false);
+    nh_.param<double>(p + "parameters/auto_record_interval_s",
+                      config_.auto_record_interval_s, 3.0);
+    config_.auto_record_interval_s = std::max(config_.auto_record_interval_s, 0.5);
 }
 
 // =============================================================================
@@ -135,6 +144,18 @@ void WaypointRecorder::SetupRosInterfaces() {
     clear_service_ = nh_.advertiseService(
         config_.clear_service_name,
         &WaypointRecorder::ClearServiceCallback, this);
+    auto_record_start_service_ = nh_.advertiseService(
+        config_.auto_record_start_service_name,
+        &WaypointRecorder::AutoRecordStartServiceCallback, this);
+    auto_record_stop_service_ = nh_.advertiseService(
+        config_.auto_record_stop_service_name,
+        &WaypointRecorder::AutoRecordStopServiceCallback, this);
+
+    // 创建自动录制定时器，初始停止
+    auto_record_timer_ = nh_.createTimer(
+        ros::Duration(config_.auto_record_interval_s),
+        &WaypointRecorder::AutoRecordTimerCallback, this);
+    auto_record_timer_.stop();
 }
 
 void WaypointRecorder::OdometryCallback(
@@ -231,10 +252,11 @@ bool WaypointRecorder::RecordServiceCallback(
     const double yaw_rad =
         GetYawFromQuaternion(latest_odometry_.pose.pose.orientation);
     wp.yaw_deg = RadToDeg(yaw_rad);
+    wp.stop = true;
     waypoints_.push_back(wp);
 
     std::ostringstream oss;
-    oss << "Recorded waypoint #" << waypoints_.size()
+    oss << "[Stop] Recorded waypoint #" << waypoints_.size()
         << ": x=" << wp.x_m
         << ", y=" << wp.y_m
         << ", z=" << wp.z_m
@@ -286,6 +308,93 @@ bool WaypointRecorder::ClearServiceCallback(
 }
 
 // =============================================================================
+// 自动录制服务
+// =============================================================================
+
+bool WaypointRecorder::AutoRecordStartServiceCallback(
+    std_srvs::Trigger::Request& req,
+    std_srvs::Trigger::Response& res) {
+    (void)req;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (auto_recording_active_) {
+        res.success = true;
+        res.message = "Auto recording already active.";
+        ROS_WARN("[WaypointRecorder] %s", res.message.c_str());
+        return true;
+    }
+
+    if (!has_odometry_) {
+        const std::string source = (config_.mode == "path_relay")
+            ? config_.global_path_topic : config_.current_odometry_topic;
+        res.success = false;
+        res.message = "No odometry received yet from " + source;
+        ROS_WARN_STREAM("[WaypointRecorder] " << res.message);
+        return true;
+    }
+
+    auto_recording_active_ = true;
+    auto_record_timer_.start();
+
+    std::ostringstream oss;
+    oss << "Auto recording started (interval="
+        << config_.auto_record_interval_s << "s).";
+    res.success = true;
+    res.message = oss.str();
+    ROS_INFO_STREAM("[WaypointRecorder] " << res.message);
+    return true;
+}
+
+bool WaypointRecorder::AutoRecordStopServiceCallback(
+    std_srvs::Trigger::Request& req,
+    std_srvs::Trigger::Response& res) {
+    (void)req;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!auto_recording_active_) {
+        res.success = true;
+        res.message = "Auto recording already stopped.";
+        ROS_WARN("[WaypointRecorder] %s", res.message.c_str());
+        return true;
+    }
+
+    auto_recording_active_ = false;
+    auto_record_timer_.stop();
+
+    std::ostringstream oss;
+    oss << "Auto recording stopped (recorded "
+        << waypoints_.size() << " waypoints total).";
+    res.success = true;
+    res.message = oss.str();
+    ROS_INFO_STREAM("[WaypointRecorder] " << res.message);
+    return true;
+}
+
+void WaypointRecorder::AutoRecordTimerCallback(const ros::TimerEvent& event) {
+    (void)event;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!has_odometry_) {
+        ROS_WARN_THROTTLE(2.0, "[WaypointRecorder] [Auto] No odometry, skipping.");
+        return;
+    }
+
+    Waypoint wp;
+    wp.x_m = latest_odometry_.pose.pose.position.x;
+    wp.y_m = latest_odometry_.pose.pose.position.y;
+    wp.z_m = latest_odometry_.pose.pose.position.z;
+    const double yaw_rad =
+        GetYawFromQuaternion(latest_odometry_.pose.pose.orientation);
+    wp.yaw_deg = RadToDeg(yaw_rad);
+    wp.stop = false;
+    waypoints_.push_back(wp);
+
+    ROS_INFO("[WaypointRecorder] [Auto] Recorded waypoint #%zu: "
+             "x=%.3f, y=%.3f, z=%.3f, yaw_deg=%.1f",
+             waypoints_.size(), wp.x_m, wp.y_m, wp.z_m, wp.yaw_deg);
+}
+
+// =============================================================================
 // 加载已有航点（仅在 load_existing=true 时启动期调用）
 // =============================================================================
 
@@ -328,6 +437,7 @@ bool WaypointRecorder::LoadExistingWaypoints() {
             wp.y_m = node["y"].as<double>();
             wp.z_m = node["z"].as<double>();
             wp.yaw_deg = node["yaw_deg"].as<double>();
+            wp.stop = node["stop"] ? node["stop"].as<bool>() : false;
             waypoints_.push_back(wp);
         }
     } catch (const YAML::Exception& e) {
@@ -370,7 +480,7 @@ bool WaypointRecorder::SaveWaypointsToFile(std::string* error_message) {
     ofs << "# indooruav_waypoint recorded waypoints\n";
     ofs << "# generated_at: " << CurrentTimestampString() << "\n";
     ofs << "# count: " << waypoints_.size() << "\n";
-    ofs << "# fields: x [m], y [m], z [m], yaw_deg [deg]\n";
+    ofs << "# fields: x [m], y [m], z [m], yaw_deg [deg], stop [bool]\n";
     ofs << "waypoints:\n";
 
     if (waypoints_.empty()) {
@@ -384,6 +494,7 @@ bool WaypointRecorder::SaveWaypointsToFile(std::string* error_message) {
                 << ", y: " << std::setprecision(3) << wp.y_m
                 << ", z: " << std::setprecision(3) << wp.z_m
                 << ", yaw_deg: " << std::setprecision(1) << wp.yaw_deg
+                << ", stop: " << (wp.stop ? "true" : "false")
                 << "}\n";
         }
     }
