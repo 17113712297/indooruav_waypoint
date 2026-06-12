@@ -178,6 +178,8 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
                       config_.xy_arrival_tolerance_m, 0.15);
     nh_.param<double>(p + "parameters/z_arrival_tolerance_m",
                       config_.z_arrival_tolerance_m, 0.15);
+    nh_.param<double>(p + "parameters/xy_switch_radius_m",
+                      config_.xy_switch_radius_m, 0.3);
 
     double yaw_rotation_tol_deg = 5.0;
     double yaw_arrival_tol_deg = 5.0;
@@ -303,6 +305,7 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
             wp.z_m = node["z"].as<double>();
             const double yaw_deg = node["yaw_deg"].as<double>();
             wp.yaw_rad = NormalizeAngleRad(DegToRad(yaw_deg));
+            wp.stop = node["stop"] ? node["stop"].as<bool>() : false;
             waypoints_.push_back(wp);
         }
     } catch (const YAML::Exception& e) {
@@ -316,6 +319,11 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
         ROS_WARN_STREAM("[WaypointTracker] Waypoint list is empty in: "
                         << resolved_path);
     } else {
+        // 最后一个航点强制为停留点
+        if (!waypoints_.back().stop) {
+            waypoints_.back().stop = true;
+            ROS_INFO("[WaypointTracker] Last waypoint forced to stop=true.");
+        }
         ROS_INFO_STREAM("[WaypointTracker] Loaded " << waypoints_.size()
                         << " waypoints from " << resolved_path);
     }
@@ -649,25 +657,36 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
 
                         if (arrived) {
                             const std::size_t old_index = current_index_;
+                            const bool current_is_stop = waypoints_[current_index_].stop;
                             ++current_index_;
-                            // 进入下一个航点：回到 PHASE_ROTATE，清空限幅器
-                            phase_ = Phase::PHASE_ROTATE;
-                            ResetLimiters();
-                            ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu",
+                            const bool next_is_stop =
+                                (current_index_ < waypoints_.size()) &&
+                                waypoints_[current_index_].stop;
+
+                            ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu (%s)",
                                      old_index,
-                                     waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                                     waypoints_.empty() ? 0 : (waypoints_.size() - 1),
+                                     current_is_stop ? "stop" : "pass-through");
 
                             if (current_index_ >= waypoints_.size()) {
                                 EnterFinishedLocked();
-                                publish_cmd = true;  // 发零速
+                                publish_cmd = true;
                                 publish_desired_step = false;
-                            } else {
-                                // 本周期 ComputeDesiredWorldVelocities 已将四个速度置零；
-                                // 下个 tick 从新航点的 PHASE_ROTATE 起步。
+                            } else if (current_is_stop || next_is_stop) {
+                                // 停留点到达，或下一个是停留点：
+                                // 走原有流程 - ResetLimiters, PHASE_ROTATE
+                                phase_ = Phase::PHASE_ROTATE;
+                                ResetLimiters();
                                 out_cmd.linear.x = 0.0;
                                 out_cmd.linear.y = 0.0;
                                 out_cmd.linear.z = 0.0;
                                 out_cmd.angular.z = 0.0;
+                                publish_cmd = true;
+                                publish_desired_step = true;
+                            } else {
+                                // 穿越点到达，下一个也是穿越点：
+                                // 保持 PHASE_MOVE，限幅器不重置，速度平滑过渡
+                                phase_ = Phase::PHASE_MOVE;
                                 publish_cmd = true;
                                 publish_desired_step = true;
                             }
@@ -763,6 +782,8 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     }
 
     // ---------------- 阶段 2：xy + z 移动，yaw 保持 ----------------
+    const bool is_stop = target.stop;
+
     // XY
     const double dx = target.x_m - current_pos.x;
     const double dy = target.y_m - current_pos.y;
@@ -771,8 +792,10 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const double v_stop_xy =
         std::sqrt(2.0 * config_.xy_limits.a_max * std::max(0.0, d_xy));
     const double v_p_xy = config_.kp_xy * d_xy;
-    const double xy_speed_target_mag =
-        std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy});
+    // 停留点：末端减速；穿越点：全程巡航速度
+    const double xy_speed_target_mag = is_stop
+        ? std::min({config_.xy_speed_mps, v_stop_xy, v_p_xy})
+        : config_.xy_speed_mps;
 
     double target_vx_world = 0.0;
     double target_vy_world = 0.0;
@@ -809,10 +832,12 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const double yaw_hold_target = SignOf(yaw_err) * yaw_hold_mag;
     *vyaw = yaw_limiter_.Update(yaw_hold_target, dt);
 
-    // 到达判定：基于 xy 与 z；是否需要 yaw 由 ignore_arrival_yaw 决定
-    const bool xy_ok = (d_xy <= config_.xy_arrival_tolerance_m);
-    const bool z_ok = (abs_dz <= config_.z_arrival_tolerance_m);
-    const bool yaw_ok = config_.ignore_arrival_yaw ||
+    // 到达判定：停留点用严格容差，穿越点只看 XY 距离
+    const double radius = is_stop ? config_.xy_arrival_tolerance_m
+                                  : config_.xy_switch_radius_m;
+    const bool xy_ok = (d_xy <= radius);
+    const bool z_ok = is_stop ? (abs_dz <= config_.z_arrival_tolerance_m) : true;
+    const bool yaw_ok = config_.ignore_arrival_yaw || is_stop ||
                         (abs_yaw_err <= config_.yaw_arrival_tolerance_rad);
     if (xy_ok && z_ok && yaw_ok) {
         // 到达：所有速度置零，限幅器全部 Reset

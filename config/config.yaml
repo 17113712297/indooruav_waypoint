@@ -84,6 +84,8 @@ indooruav_waypoint:
       # 到达判定阈值（一个航点结束）
       xy_arrival_tolerance_m: 0.1
       z_arrival_tolerance_m: 0.1
+      # 穿越点切换半径（m）：无人机进入该半径即切换到下一个航点
+      xy_switch_radius_m: 0.3
       # 当 ignore_arrival_yaw=false 时还需要 yaw 落入此容差才判定到达
       yaw_arrival_tolerance_deg: 5.0
 
@@ -113,12 +115,16 @@ indooruav_waypoint:
 
     # ----- 服务 -----
     services:
-      # 触发记录当前位置为新航点
+      # 触发记录当前位置为新航点（停留点，stop: true）
       record: indooruav_controller/waypoint_recorder/record
       # 触发将内存中的航点列表整文件覆盖写入 YAML
       save: indooruav_controller/waypoint_recorder/save
       # 触发清空内存中的航点列表
       clear: indooruav_controller/waypoint_recorder/clear
+      # 启动自动录制穿越点
+      auto_record_start: indooruav_controller/waypoint_recorder/auto_record_start
+      # 停止自动录制穿越点
+      auto_record_stop: indooruav_controller/waypoint_recorder/auto_record_stop
 
     # ----- 航点保存路径 -----
     # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
@@ -129,3 +135,5 @@ indooruav_waypoint:
     parameters:
       # 节点启动时如果目标文件已存在，是否在内存中预加载（true 续录、false 从空开始）
       load_existing: false
+      # 自动录制穿越点间隔（秒）
+      auto_record_interval_s: 3.0

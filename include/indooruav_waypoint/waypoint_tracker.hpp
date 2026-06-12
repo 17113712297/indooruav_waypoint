@@ -61,6 +61,7 @@ private:
         double y_m = 0.0;
         double z_m = 0.0;
         double yaw_rad = 0.0;
+        bool stop = false;  // true=停留点, false=穿越点
     };
 
     // 配置
@@ -104,6 +105,7 @@ private:
         // 到达 / 切换阈值
         double xy_arrival_tolerance_m = 0.15;
         double z_arrival_tolerance_m = 0.15;
+        double xy_switch_radius_m = 0.3;  // 穿越点切换半径
         double yaw_rotation_tolerance_rad = 0.0;  // 阶段1→阶段2 阈值（由 deg 转换）
         double yaw_arrival_tolerance_rad = 0.0;   // 到达 yaw 容差（由 deg 转换）
         bool ignore_arrival_yaw = true;           // 到达判定是否忽略 yaw
