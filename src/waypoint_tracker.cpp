@@ -659,22 +659,20 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                             const std::size_t old_index = current_index_;
                             const bool current_is_stop = waypoints_[current_index_].stop;
                             ++current_index_;
-                            const bool next_is_stop =
-                                (current_index_ < waypoints_.size()) &&
-                                waypoints_[current_index_].stop;
 
-                            ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu (%s)",
-                                     old_index,
-                                     waypoints_.empty() ? 0 : (waypoints_.size() - 1),
-                                     current_is_stop ? "stop" : "pass-through");
+                            ROS_INFO_THROTTLE(
+                                0.5,
+                                "[WaypointTracker] Arrived at waypoint %zu/%zu (%s)",
+                                old_index,
+                                waypoints_.empty() ? 0 : (waypoints_.size() - 1),
+                                current_is_stop ? "stop" : "pass-through");
 
                             if (current_index_ >= waypoints_.size()) {
                                 EnterFinishedLocked();
                                 publish_cmd = true;
                                 publish_desired_step = false;
-                            } else if (current_is_stop || next_is_stop) {
-                                // 停留点到达，或下一个是停留点：
-                                // 走原有流程 - ResetLimiters, PHASE_ROTATE
+                            } else if (current_is_stop) {
+                                // 停留点到达：走原有流程 - ResetLimiters, PHASE_ROTATE
                                 phase_ = Phase::PHASE_ROTATE;
                                 ResetLimiters();
                                 out_cmd.linear.x = 0.0;
@@ -684,9 +682,17 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                                 publish_cmd = true;
                                 publish_desired_step = true;
                             } else {
-                                // 穿越点到达，下一个也是穿越点：
-                                // 保持 PHASE_MOVE，限幅器不重置，速度平滑过渡
+                                // 穿越点到达：保持 PHASE_MOVE，速度无缝衔接
                                 phase_ = Phase::PHASE_MOVE;
+                                double vx_body = 0.0;
+                                double vy_body = 0.0;
+                                TransformWorldFluVelocityToBodyFlu(
+                                    vx_world, vy_world, current_yaw,
+                                    &vx_body, &vy_body);
+                                out_cmd.linear.x = vx_body;
+                                out_cmd.linear.y = vy_body;
+                                out_cmd.linear.z = vz_world;
+                                out_cmd.angular.z = vyaw;
                                 publish_cmd = true;
                                 publish_desired_step = true;
                             }
@@ -837,18 +843,21 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
                                   : config_.xy_switch_radius_m;
     const bool xy_ok = (d_xy <= radius);
     const bool z_ok = is_stop ? (abs_dz <= config_.z_arrival_tolerance_m) : true;
-    const bool yaw_ok = config_.ignore_arrival_yaw || is_stop ||
+    const bool yaw_ok = !is_stop || config_.ignore_arrival_yaw ||
                         (abs_yaw_err <= config_.yaw_arrival_tolerance_rad);
     if (xy_ok && z_ok && yaw_ok) {
-        // 到达：所有速度置零，限幅器全部 Reset
-        xy_vx_limiter_.Reset();
-        xy_vy_limiter_.Reset();
-        z_limiter_.Reset();
-        yaw_limiter_.Reset();
-        *vx_world = 0.0;
-        *vy_world = 0.0;
-        *vz_world = 0.0;
-        *vyaw = 0.0;
+        if (is_stop) {
+            // 停留点：速度置零，限幅器 Reset
+            xy_vx_limiter_.Reset();
+            xy_vy_limiter_.Reset();
+            z_limiter_.Reset();
+            yaw_limiter_.Reset();
+            *vx_world = 0.0;
+            *vy_world = 0.0;
+            *vz_world = 0.0;
+            *vyaw = 0.0;
+        }
+        // 穿越点：保留本 tick 已算好的速度，限幅器状态原样带入下一个航点
         *arrived = true;
     }
 }
