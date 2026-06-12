@@ -336,6 +336,35 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
             ROS_INFO("[WaypointTracker] Trimmed %zu pass-through waypoints after last stop.",
                      removed);
         }
+
+        // 屏蔽停留点 1m 半径内的穿越点
+        constexpr double kStopShieldRadius = 1.0;
+        std::vector<Waypoint> filtered;
+        filtered.reserve(waypoints_.size());
+        for (const auto& wp : waypoints_) {
+            if (wp.stop) {
+                filtered.push_back(wp);
+                continue;
+            }
+            bool near_stop = false;
+            for (const auto& sw : waypoints_) {
+                if (!sw.stop) continue;
+                const double ddx = wp.x_m - sw.x_m;
+                const double ddy = wp.y_m - sw.y_m;
+                if (std::sqrt(ddx * ddx + ddy * ddy) < kStopShieldRadius) {
+                    near_stop = true;
+                    break;
+                }
+            }
+            if (!near_stop) {
+                filtered.push_back(wp);
+            }
+        }
+        if (filtered.size() < waypoints_.size()) {
+            ROS_INFO("[WaypointTracker] Filtered %zu pass-through waypoints near stop waypoints.",
+                     waypoints_.size() - filtered.size());
+            waypoints_ = std::move(filtered);
+        }
         ROS_INFO_STREAM("[WaypointTracker] Loaded " << waypoints_.size()
                         << " waypoints from " << resolved_path);
     }
