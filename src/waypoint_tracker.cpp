@@ -660,12 +660,15 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                             const bool current_is_stop = waypoints_[current_index_].stop;
                             ++current_index_;
 
-                            ROS_INFO_THROTTLE(
-                                0.5,
-                                "[WaypointTracker] Arrived at waypoint %zu/%zu (%s)",
-                                old_index,
-                                waypoints_.empty() ? 0 : (waypoints_.size() - 1),
-                                current_is_stop ? "stop" : "pass-through");
+                            if (current_is_stop) {
+                                ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu (stop)",
+                                         old_index,
+                                         waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                            } else {
+                                ROS_DEBUG("[WaypointTracker] Arrived at waypoint %zu/%zu (pass-through)",
+                                          old_index,
+                                          waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                            }
 
                             if (current_index_ >= waypoints_.size()) {
                                 EnterFinishedLocked();
