@@ -23,7 +23,7 @@ class CircleSimulator:
 
     def __init__(self, rate=50.0):
         self.rate = rate
-        self.pub = rospy.Publisher("/Odometry_path", Odometry, queue_size=10)
+        self.pub = rospy.Publisher("/Odometry_global", Odometry, queue_size=10)
 
         self.cx = rospy.get_param("~circle_center_x", 0.0)
         self.cy = rospy.get_param("~circle_center_y", 0.0)
