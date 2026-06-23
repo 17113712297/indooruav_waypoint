@@ -109,7 +109,7 @@ void WaypointRecorder::LoadParameters(ros::NodeHandle& pnh) {
                            std::string("indooruav_waypoint"));
     nh_.param<std::string>(p + "waypoints_file_path",
                            config_.waypoints_file_path,
-                           std::string("config/waypoints.yaml"));
+                           std::string("waypoints/waypoints.yaml"));
 
     nh_.param<bool>(p + "parameters/load_existing",
                     config_.load_existing, false);

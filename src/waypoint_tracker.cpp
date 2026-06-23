@@ -115,7 +115,7 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
                            std::string("indooruav_waypoint"));
     nh_.param<std::string>(p + "waypoints_file_path",
                            config_.waypoints_file_path,
-                           std::string("config/waypoints.yaml"));
+                           std::string("waypoints/waypoints.yaml"));
 
     // parameters
     nh_.param<double>(p + "parameters/control_rate_hz",

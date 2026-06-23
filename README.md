@@ -132,7 +132,7 @@ source devel/setup.bash
 | `services/pause` | `indooruav_controller/waypoint_tracker/pause` | — | pause 服务名 |
 | `services/stop` | `indooruav_controller/waypoint_tracker/stop` | — | stop 服务名 |
 | `waypoints_package_name` | `indooruav_waypoint` | — | 相对路径解析的根包名 |
-| `waypoints_file_path` | `config/waypoints.yaml` | — | 航点文件路径（相对或绝对均可） |
+| `waypoints_file_path` | `waypoints/waypoints.yaml` | — | 航点文件路径（相对或绝对均可） |
 | `parameters/control_rate_hz` | `30.0` | Hz | 控制定时器频率 |
 | `parameters/odometry_timeout_s` | `0.2` | s | 里程计陈旧判定阈值，超时发零速 |
 | `parameters/autostart` | `false` | bool | 节点启动后是否自动进入 RUNNING |
@@ -161,7 +161,7 @@ source devel/setup.bash
 | `services/save` | `indooruav_controller/waypoint_recorder/save` | — |
 | `services/clear` | `indooruav_controller/waypoint_recorder/clear` | — |
 | `waypoints_package_name` | `indooruav_waypoint` | 相对路径解析根包 |
-| `waypoints_file_path` | `config/waypoints.yaml` | 写入文件路径 |
+| `waypoints_file_path` | `waypoints/waypoints.yaml` | 写入文件路径 |
 | `parameters/load_existing` | `false` | 启动时是否从磁盘预加载航点（true = 续录模式） |
 
 ---
