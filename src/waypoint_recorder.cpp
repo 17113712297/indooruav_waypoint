@@ -22,6 +22,31 @@ namespace {
 
 constexpr double kRadToDegConst = 180.0 / 3.14159265358979323846;
 
+// 从 FASTLIO2_SAM_LC/config/localize.yaml 读取 pcd_name（不含扩展名）
+std::string ReadPcdNameFromLocalizeYaml() {
+    try {
+        std::string fastlio_path = ros::package::getPath("fastlio");
+        if (fastlio_path.empty()) {
+            return "";
+        }
+        std::string yaml_path = fastlio_path + "/config/localize.yaml";
+        YAML::Node root = YAML::LoadFile(yaml_path);
+        if (root["localizer"] && root["localizer"]["auto_reloc"] &&
+            root["localizer"]["auto_reloc"]["pcd_name"]) {
+            std::string pcd_name = root["localizer"]["auto_reloc"]["pcd_name"].as<std::string>();
+            // 去掉 .pcd 扩展名
+            std::string::size_type pos = pcd_name.rfind(".pcd");
+            if (pos != std::string::npos) {
+                pcd_name = pcd_name.substr(0, pos);
+            }
+            return pcd_name;
+        }
+    } catch (const std::exception& e) {
+        ROS_WARN_STREAM("[WaypointRecorder] Failed to read pcd_name from localize.yaml: " << e.what());
+    }
+    return "";
+}
+
 }  // namespace
 
 // =============================================================================
@@ -481,6 +506,11 @@ bool WaypointRecorder::SaveWaypointsToFile(std::string* error_message) {
     ofs << "# generated_at: " << CurrentTimestampString() << "\n";
     ofs << "# count: " << waypoints_.size() << "\n";
     ofs << "# fields: x [m], y [m], z [m], yaw_deg [deg], stop [bool]\n";
+    // 从 localize.yaml 读取 pcd_name 作为 map3d_name
+    std::string map3d_name = ReadPcdNameFromLocalizeYaml();
+    if (!map3d_name.empty()) {
+        ofs << "map3d_name: " << map3d_name << "\n";
+    }
     ofs << "waypoints:\n";
 
     if (waypoints_.empty()) {
