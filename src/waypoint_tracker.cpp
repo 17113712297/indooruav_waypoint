@@ -328,11 +328,11 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
             last_stop = i;
         }
 
-        // 没有停留点 → 强制最后一个为停留点
+        // 没有停留点 → 全部为穿越点，不执行跟踪
         if (last_stop < 0) {
-            ROS_WARN("[WaypointTracker] No stop waypoint found, forcing last one.");
-            waypoints_.back().stop = true;
-            first_stop = last_stop = static_cast<int>(waypoints_.size()) - 1;
+            ROS_WARN("[WaypointTracker] No stop waypoint found. All waypoints are pass-through, nothing to track.");
+            waypoints_.clear();
+            return true;
         }
 
         // 截掉第一个停留点之前的穿越点（对称于后端的 resize）
