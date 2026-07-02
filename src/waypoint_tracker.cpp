@@ -319,18 +319,33 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
         ROS_WARN_STREAM("[WaypointTracker] Waypoint list is empty in: "
                         << resolved_path);
     } else {
-        // 截掉最后一个停留点之后的穿越点
+        // 找到第一个和最后一个停留点
+        int first_stop = -1;
         int last_stop = -1;
-        for (int i = static_cast<int>(waypoints_.size()) - 1; i >= 0; --i) {
-            if (waypoints_[i].stop) {
-                last_stop = i;
-                break;
-            }
+        for (int i = 0; i < static_cast<int>(waypoints_.size()); ++i) {
+            if (!waypoints_[i].stop) continue;
+            if (first_stop < 0) first_stop = i;
+            last_stop = i;
         }
+
+        // 没有停留点 → 强制最后一个为停留点
         if (last_stop < 0) {
             ROS_WARN("[WaypointTracker] No stop waypoint found, forcing last one.");
             waypoints_.back().stop = true;
-        } else if (last_stop + 1 < static_cast<int>(waypoints_.size())) {
+            first_stop = last_stop = static_cast<int>(waypoints_.size()) - 1;
+        }
+
+        // 截掉第一个停留点之前的穿越点（对称于后端的 resize）
+        if (first_stop > 0) {
+            waypoints_.erase(waypoints_.begin(), waypoints_.begin() + first_stop);
+            last_stop -= first_stop;
+            ROS_INFO("[WaypointTracker] Trimmed %d pass-through waypoints before first stop.",
+                     first_stop);
+            first_stop = 0;
+        }
+
+        // 截掉最后一个停留点之后的穿越点
+        if (last_stop + 1 < static_cast<int>(waypoints_.size())) {
             const std::size_t removed = waypoints_.size() - (last_stop + 1);
             waypoints_.resize(last_stop + 1);
             ROS_INFO("[WaypointTracker] Trimmed %zu pass-through waypoints after last stop.",
