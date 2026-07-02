@@ -16,6 +16,8 @@ indooruav_waypoint:
       desired_odometry: indooruav_controller/waypoint_tracker/odom_goal
       # 发布的速度指令话题
       velocity_command: indooruav_controller/waypoint_tracker/cmd_vel
+      # 发布的停留点到达编号话题（stop 点到达时发布 1-based 序号）
+      stop_arrived: /Odometry_waypointsid
 
     # ----- 服务 -----
     services:

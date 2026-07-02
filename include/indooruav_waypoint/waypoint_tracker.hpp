@@ -25,6 +25,7 @@
 #include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
+#include <std_msgs/UInt32.h>
 #include <std_srvs/Empty.h>
 
 #include "indooruav_waypoint/smooth_velocity_limiter.hpp"
@@ -62,6 +63,7 @@ private:
         double z_m = 0.0;
         double yaw_rad = 0.0;
         bool stop = false;  // true=停留点, false=穿越点
+        int stop_number = 0;  // stop=true 时在航线中的序号（1-based），到达时通过话题发布
     };
 
     // 配置
@@ -70,6 +72,7 @@ private:
         std::string current_odometry_topic;
         std::string desired_odometry_topic;
         std::string velocity_command_topic;
+        std::string stop_arrived_topic;
 
         // services
         std::string start_service_name;
@@ -172,6 +175,7 @@ private:
     ros::Subscriber odometry_subscriber_;
     ros::Publisher velocity_command_publisher_;
     ros::Publisher desired_odometry_publisher_;
+    ros::Publisher stop_arrived_publisher_;
     ros::ServiceServer start_service_;
     ros::ServiceServer pause_service_;
     ros::ServiceServer stop_service_;

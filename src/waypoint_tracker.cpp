@@ -94,6 +94,9 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<std::string>(p + "topics/velocity_command",
                            config_.velocity_command_topic,
                            std::string("indooruav_controller/waypoint_tracker/cmd_vel"));
+    nh_.param<std::string>(p + "topics/stop_arrived",
+                           config_.stop_arrived_topic,
+                           std::string("/Odometry_waypointsid"));
 
     // services
     nh_.param<std::string>(p + "services/start",
@@ -380,6 +383,18 @@ bool WaypointTracker::LoadWaypointsFromYaml() {
                      waypoints_.size() - filtered.size());
             waypoints_ = std::move(filtered);
         }
+
+        // 给 stop=true 的航点编序号（1-based），按航线顺序
+        {
+            int seq = 0;
+            for (auto& wp : waypoints_) {
+                if (wp.stop) {
+                    wp.stop_number = ++seq;
+                }
+            }
+            ROS_INFO("[WaypointTracker] Numbered %d stop waypoints for frontend.", seq);
+        }
+
         ROS_INFO_STREAM("[WaypointTracker] Loaded " << waypoints_.size()
                         << " waypoints from " << resolved_path);
     }
@@ -399,6 +414,8 @@ void WaypointTracker::SetupRosInterfaces() {
         nh_.advertise<geometry_msgs::Twist>(config_.velocity_command_topic, 5, false);
     desired_odometry_publisher_ =
         nh_.advertise<nav_msgs::Odometry>(config_.desired_odometry_topic, 5, false);
+    stop_arrived_publisher_ =
+        nh_.advertise<std_msgs::UInt32>(config_.stop_arrived_topic, 5, false);
 
     start_service_ = nh_.advertiseService(
         config_.start_service_name,
@@ -629,6 +646,7 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
     bool publish_zero_once = false;
     bool publish_cmd = false;
     bool publish_desired_step = false;
+    int stop_arrived_number = 0;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -717,9 +735,11 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                             ++current_index_;
 
                             if (current_is_stop) {
-                                ROS_INFO("[WaypointTracker] Arrived at waypoint %zu/%zu (stop)",
+                                ROS_INFO("[WaypointTracker] Arrived at stop waypoint #%d (index %zu/%zu)",
+                                         waypoints_[old_index].stop_number,
                                          old_index,
                                          waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                                stop_arrived_number = waypoints_[old_index].stop_number;
                             } else {
                                 ROS_DEBUG("[WaypointTracker] Arrived at waypoint %zu/%zu (pass-through)",
                                           old_index,
@@ -782,6 +802,14 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
 
     if (publish_desired_step) {
         PublishDesiredOdometryStep();
+    }
+
+    // 锁外发布 stop 到达编号（防止持锁调用 ROS publish）
+    if (stop_arrived_number > 0) {
+        std_msgs::UInt32 msg;
+        msg.data = stop_arrived_number;
+        stop_arrived_publisher_.publish(msg);
+        ROS_INFO("[WaypointTracker] Published stop_arrived: %u", msg.data);
     }
 
     if (publish_cmd) {
