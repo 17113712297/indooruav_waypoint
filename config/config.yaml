@@ -32,7 +32,7 @@ indooruav_waypoint:
     # ----- 航点文件路径 -----
     # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
     waypoints_package_name: indooruav_waypoint
-    waypoints_file_path: waypoints/waypoints.yaml
+    waypoints_file_path: waypoints/823waypoints.yaml
 
     # ----- 控制器基本参数 -----
     parameters:
