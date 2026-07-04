@@ -587,6 +587,7 @@ void WaypointTracker::ControlTimerCallback(const ros::TimerEvent& event) {
     // 锁外：检查巡航完成标志，触发 oneshot timer
     if (cruise_complete_pending_) {
         cruise_complete_pending_ = false;
+        cruise_complete_timer_.stop();   // 复位 started_，保证 oneshot 能被重新排程
         cruise_complete_timer_.start();
     }
 }
