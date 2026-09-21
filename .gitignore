@@ -1,0 +1,7 @@
+# indooruav_waypoint 仓库忽略规则
+# 运行时航点数据（不纳入版本控制）
+waypoints/
+waypoints_pixel/
+
+__pycache__/
+.vscode/
