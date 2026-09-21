@@ -25,7 +25,7 @@ constexpr double kRadToDegConst = 180.0 / 3.14159265358979323846;
 // 从 indooruav_localize/config/localize.yaml 读取 pcd_name（不含扩展名）
 std::string ReadPcdNameFromLocalizeYaml() {
     try {
-        std::string fastlio_path = ros::package::getPath("fastlio");
+        std::string fastlio_path = ros::package::getPath("indooruav_localize");
         if (fastlio_path.empty()) {
             return "";
         }
