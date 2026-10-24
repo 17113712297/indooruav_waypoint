@@ -44,10 +44,12 @@ public:
 private:
     // 节点内部状态机
     enum class State {
-        IDLE,       // 已初始化但未开始：发零速悬停
-        RUNNING,    // 正在追踪航点
-        PAUSED,     // 暂停：发零速悬停，保留 current_index_
-        FINISHED,   // 已完成最后一个航点：发零速悬停
+        IDLE,            // 已初始化但未开始：发零速悬停
+        RUNNING,         // 正方向追踪航点（index 递增）
+        PAUSED,          // 暂停：发零速悬停，保留 current_index_ 与方向
+        FINISHED,        // 已完成最后一个航点：发零速悬停
+        RETURNING,       // 返航：反方向追踪航点（index 递减），目标是回到 index 0
+        RETURN_FINISHED, // 返航已到达第一个航点：发零速悬停，等待上层切 Land
     };
 
     // 每个航点的两阶段顺序流程（已进入 MOVE 后不会回退到 ROTATE）
@@ -73,12 +75,15 @@ private:
         std::string desired_odometry_topic;
         std::string velocity_command_topic;
         std::string stop_arrived_topic;
+        std::string status_topic;
 
         // services
         std::string start_service_name;
         std::string pause_service_name;
         std::string stop_service_name;
         std::string cruise_complete_service_name;
+        std::string return_service_name;
+        std::string return_complete_service_name;
 
         // file
         std::string waypoints_package_name;
@@ -112,6 +117,11 @@ private:
         double yaw_rotation_tolerance_rad = 0.0;  // 阶段1→阶段2 阈值（由 deg 转换）
         double yaw_arrival_tolerance_rad = 0.0;   // 到达 yaw 容差（由 deg 转换）
         bool ignore_arrival_yaw = true;           // 到达判定是否忽略 yaw
+
+        // 返航（反向追踪）
+        // true ：反方向时把目标 yaw 旋转 180°，机头始终朝行进方向（推荐，避免倒着飞）
+        // false：反方向时沿用航点记录时的机位 yaw（机头保持原朝向，尾部朝前）
+        bool reverse_flip_yaw = true;
     };
 
     // 初始化流程
@@ -124,6 +134,7 @@ private:
     void OdometryCallback(const nav_msgs::Odometry::ConstPtr& msg);
     void ControlTimerCallback(const ros::TimerEvent& event);
     void CruiseCompleteTimerCallback(const ros::TimerEvent& event);
+    void ReturnCompleteTimerCallback(const ros::TimerEvent& event);
 
     bool StartServiceCallback(std_srvs::Empty::Request& req,
                               std_srvs::Empty::Response& res);
@@ -131,6 +142,8 @@ private:
                               std_srvs::Empty::Response& res);
     bool StopServiceCallback(std_srvs::Empty::Request& req,
                              std_srvs::Empty::Response& res);
+    bool ReturnServiceCallback(std_srvs::Empty::Request& req,
+                               std_srvs::Empty::Response& res);
 
     // 控制核心
     void RunControlStep(const ros::Time& now);
@@ -150,11 +163,15 @@ private:
                                         double vyaw,
                                         double current_yaw_rad);
     void PublishDesiredOdometryStep();
+    void PublishStatus();
     void ResetLimiters();
     void EnterIdleLocked();
     void EnterRunningLocked();
     void EnterPausedLocked();
     void EnterFinishedLocked();
+    void EnterReturningLocked();
+    void EnterReturnFinishedLocked();
+    const char* StateName() const;
 
 
     // 数学工具（与 position_controller.hpp 保持一致）
@@ -179,12 +196,22 @@ private:
     ros::ServiceServer start_service_;
     ros::ServiceServer pause_service_;
     ros::ServiceServer stop_service_;
+    ros::ServiceServer return_service_;
+    ros::Publisher status_publisher_;
     ros::Timer control_timer_;
     ros::Timer cruise_complete_timer_;
     ros::ServiceClient cruise_complete_client_;
     std::atomic<bool> cruise_complete_pending_{false};
     int cruise_complete_retry_count_ = 0;
     static constexpr int kMaxCruiseCompleteRetries = 5;
+
+    // 返航完成通知（与 cruise_complete 同一套"延迟通知 + 重试"机制）
+    ros::Timer return_complete_timer_;
+    ros::ServiceClient return_complete_client_;
+    std::atomic<bool> return_complete_pending_{false};
+    int return_complete_retry_count_ = 0;
+    static constexpr int kMaxReturnCompleteRetries = 5;
+    ros::Time last_status_publish_time_;
 
     // 配置
     Config config_;
@@ -204,6 +231,9 @@ private:
     // 状态机
     State state_ = State::IDLE;
     Phase phase_ = Phase::PHASE_ROTATE;
+    // 当前追踪方向：false=正方向（index 递增），true=返航（index 递减）
+    // PAUSED 期间保留，用于判断 resume 时回到 RUNNING 还是 RETURNING
+    bool reverse_ = false;
 
     // 限幅器：XY 在世界系下分两个轴跑独立限幅器，
     // 这样航点切换时方向跳变可被限幅器自然处理为平滑过渡（即"切弯"）。

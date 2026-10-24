@@ -18,6 +18,10 @@ indooruav_waypoint:
       velocity_command: indooruav_controller/waypoint_tracker/cmd_vel
       # 发布的停留点到达编号话题（stop 点到达时发布 1-based 序号）
       stop_arrived: /Odometry_waypointsid
+      # 追踪器状态上报（JSON 字符串，2Hz）：
+      # {"state":"RUNNING|PAUSED|RETURNING|RETURN_FINISHED|IDLE|FINISHED",
+      #  "index":3,"total":12,"reverse":false}
+      status: indooruav_controller/waypoint_tracker/status
 
     # ----- 服务 -----
     services:
@@ -28,6 +32,12 @@ indooruav_waypoint:
       # 关闭追踪并复位（航点索引归零）
       stop: indooruav_controller/waypoint_tracker/stop
       cruise_complete: indooruav_core/state_machine_event/cruise_complete
+      # 返航：沿航点序列反方向逐个回退，回到第一个航点后发 return_complete
+      # 只在 PAUSED（或已到达末点的 FINISHED）可用，飞行中直接拒绝；
+      # 由 indooruav_core 状态机在 Paused 状态下下发
+      return: indooruav_controller/waypoint_tracker/return
+      # 返航完成事件：到达第一个航点后回调状态机，由状态机切入 Land
+      return_complete: indooruav_core/state_machine_event/return_complete
 
     # ----- 航点文件路径 -----
     # 相对路径会以 waypoints_package_name 为根解析；绝对路径直接使用
@@ -95,6 +105,11 @@ indooruav_waypoint:
       #   true  -> 只看 xy 与 z 容差（默认，更不易因 yaw 微抖卡在最后一段）
       #   false -> 还需要 yaw 也落入 yaw_arrival_tolerance_deg
       ignore_arrival_yaw: true
+
+      # 返航（反向追踪）时目标 yaw 是否翻转 180°
+      #   true  -> 机头朝反方向行进方向（推荐，避免长距离倒飞）
+      #   false -> 沿用去程记录的朝向，机头不变，飞机尾部朝前
+      reverse_flip_yaw: true
 
   # ============================================================
   # 航点录制器：waypoint_recorder_node

@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <ros/package.h>
+#include <std_msgs/String.h>
 #include <yaml-cpp/yaml.h>
 
 namespace indooruav_waypoint {
@@ -97,6 +99,9 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<std::string>(p + "topics/stop_arrived",
                            config_.stop_arrived_topic,
                            std::string("/Odometry_waypointsid"));
+    nh_.param<std::string>(p + "topics/status",
+                           config_.status_topic,
+                           std::string("indooruav_controller/waypoint_tracker/status"));
 
     // services
     nh_.param<std::string>(p + "services/start",
@@ -111,6 +116,12 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<std::string>(p + "services/cruise_complete",
                            config_.cruise_complete_service_name,
                            std::string("indooruav_core/state_machine_event/cruise_complete"));
+    nh_.param<std::string>(p + "services/return",
+                           config_.return_service_name,
+                           std::string("indooruav_controller/waypoint_tracker/return"));
+    nh_.param<std::string>(p + "services/return_complete",
+                           config_.return_complete_service_name,
+                           std::string("indooruav_core/state_machine_event/return_complete"));
 
     // file
     nh_.param<std::string>(p + "waypoints_package_name",
@@ -196,6 +207,9 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
     nh_.param<bool>(p + "parameters/ignore_arrival_yaw",
                     config_.ignore_arrival_yaw, true);
 
+    nh_.param<bool>(p + "parameters/reverse_flip_yaw",
+                    config_.reverse_flip_yaw, true);
+
     // 数值兜底：增益必须非负
     config_.kp_xy = std::max(config_.kp_xy, 0.0);
     config_.kp_z = std::max(config_.kp_z, 0.0);
@@ -227,6 +241,10 @@ void WaypointTracker::LoadParameters(ros::NodeHandle& pnh) {
              config_.control_rate_hz,
              config_.odometry_timeout_s,
              config_.autostart ? "true" : "false");
+    ROS_INFO("[WaypointTracker] return service=%s, return_complete=%s, reverse_flip_yaw=%s",
+             config_.return_service_name.c_str(),
+             config_.return_complete_service_name.c_str(),
+             config_.reverse_flip_yaw ? "true" : "false");
 }
 
 // =============================================================================
@@ -416,6 +434,8 @@ void WaypointTracker::SetupRosInterfaces() {
         nh_.advertise<nav_msgs::Odometry>(config_.desired_odometry_topic, 5, false);
     stop_arrived_publisher_ =
         nh_.advertise<std_msgs::UInt32>(config_.stop_arrived_topic, 5, false);
+    status_publisher_ =
+        nh_.advertise<std_msgs::String>(config_.status_topic, 5, false);
 
     start_service_ = nh_.advertiseService(
         config_.start_service_name,
@@ -426,6 +446,9 @@ void WaypointTracker::SetupRosInterfaces() {
     stop_service_ = nh_.advertiseService(
         config_.stop_service_name,
         &WaypointTracker::StopServiceCallback, this);
+    return_service_ = nh_.advertiseService(
+        config_.return_service_name,
+        &WaypointTracker::ReturnServiceCallback, this);
 
     cruise_complete_client_ = nh_.serviceClient<std_srvs::Empty>(
         config_.cruise_complete_service_name);
@@ -435,6 +458,15 @@ void WaypointTracker::SetupRosInterfaces() {
         &WaypointTracker::CruiseCompleteTimerCallback,
         this, true /* oneshot */);
     cruise_complete_timer_.stop();
+
+    return_complete_client_ = nh_.serviceClient<std_srvs::Empty>(
+        config_.return_complete_service_name);
+
+    return_complete_timer_ = nh_.createTimer(
+        ros::Duration(0.001),
+        &WaypointTracker::ReturnCompleteTimerCallback,
+        this, true /* oneshot */);
+    return_complete_timer_.stop();
 
     control_timer_ = nh_.createTimer(
         ros::Duration(1.0 / config_.control_rate_hz),
@@ -474,15 +506,29 @@ bool WaypointTracker::StartServiceCallback(std_srvs::Empty::Request& req,
         case State::RUNNING:
             ROS_INFO("[WaypointTracker] Already RUNNING, no change.");
             return true;
+        case State::RETURNING:
+            ROS_INFO("[WaypointTracker] Already RETURNING, no change.");
+            return true;
         case State::PAUSED:
-            EnterRunningLocked();
-            ROS_INFO_STREAM("[WaypointTracker] Resumed from PAUSED at index "
-                            << current_index_);
+            // 暂停时保留了方向：从返航暂停恢复必须回到 RETURNING，而不是从头开始巡航
+            if (reverse_) {
+                state_ = State::RETURNING;
+                phase_ = Phase::PHASE_ROTATE;
+                ResetLimiters();
+                last_control_time_ = ros::Time();
+                ROS_INFO_STREAM("[WaypointTracker] Resumed RETURNING from PAUSED at index "
+                                << current_index_);
+            } else {
+                EnterRunningLocked();
+                ROS_INFO_STREAM("[WaypointTracker] Resumed from PAUSED at index "
+                                << current_index_);
+            }
             return true;
         case State::FINISHED:
+        case State::RETURN_FINISHED:
             current_index_ = 0;
             EnterRunningLocked();
-            ROS_INFO("[WaypointTracker] Restarted from index 0 (was FINISHED).");
+            ROS_INFO("[WaypointTracker] Restarted from index 0 (was finished).");
             return true;
         case State::IDLE:
         default:
@@ -509,8 +555,15 @@ bool WaypointTracker::PauseServiceCallback(std_srvs::Empty::Request& req,
         return true;
     }
 
+    if (state_ != State::RUNNING && state_ != State::RETURNING) {
+        ROS_WARN("[WaypointTracker] Pause rejected: state=%s (only RUNNING/RETURNING can pause).",
+                 StateName());
+        return true;
+    }
+
     EnterPausedLocked();
-    ROS_INFO_STREAM("[WaypointTracker] Paused at index " << current_index_);
+    ROS_INFO_STREAM("[WaypointTracker] Paused at index " << current_index_
+                    << " (direction=" << (reverse_ ? "RETURN" : "FORWARD") << ")");
     return true;
 }
 
@@ -527,7 +580,41 @@ bool WaypointTracker::StopServiceCallback(std_srvs::Empty::Request& req,
 
     EnterIdleLocked();
     current_index_ = 0;
+    reverse_ = false;
     ROS_INFO("[WaypointTracker] Stopped and reset to index 0.");
+    return true;
+}
+
+// 返航：从当前航点开始，沿航点序列反方向逐个回退，最终回到 index 0。
+// 只允许在 PAUSED（或已到达末点的 FINISHED）状态下发起——上层状态机也只会
+// 在 Paused 时下发 ReturnCommand，这里做第二道闸门，
+// 避免飞行中（RUNNING）被直接切入返航。
+bool WaypointTracker::ReturnServiceCallback(std_srvs::Empty::Request& req,
+                                            std_srvs::Empty::Response& res) {
+    (void)req;
+    (void)res;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_ || waypoints_.empty()) {
+        ROS_WARN("[WaypointTracker] Return rejected: not initialized or no waypoints.");
+        return true;
+    }
+
+    if (state_ == State::RETURNING) {
+        ROS_INFO("[WaypointTracker] Already RETURNING.");
+        return true;
+    }
+
+    if (state_ != State::PAUSED && state_ != State::FINISHED) {
+        ROS_WARN("[WaypointTracker] Return rejected: state=%s. 必须在暂停状态返航"
+                 "（飞行中不允许直接返航）；若飞行已结束请先 pause 或 stop。",
+                 StateName());
+        return true;
+    }
+
+    EnterReturningLocked();
+    ROS_INFO("[WaypointTracker] RETURNING started at index %zu/%zu.",
+             current_index_, waypoints_.size());
     return true;
 }
 
@@ -538,12 +625,14 @@ bool WaypointTracker::StopServiceCallback(std_srvs::Empty::Request& req,
 void WaypointTracker::EnterIdleLocked() {
     state_ = State::IDLE;
     phase_ = Phase::PHASE_ROTATE;
+    reverse_ = false;
     ResetLimiters();
     last_control_time_ = ros::Time();
 }
 
 void WaypointTracker::EnterRunningLocked() {
     state_ = State::RUNNING;
+    reverse_ = false;
     // 每次进入 RUNNING 都从当前航点的“原地旋转”阶段开始；
     // 限幅器一律清零，保证旋转从静止起步，避免 pause/stop 残留状态污染。
     phase_ = Phase::PHASE_ROTATE;
@@ -553,6 +642,7 @@ void WaypointTracker::EnterRunningLocked() {
 
 void WaypointTracker::EnterPausedLocked() {
     state_ = State::PAUSED;
+    // reverse_ 刻意不清零：暂停只是冻结，方向要留到 resume 时使用
     phase_ = Phase::PHASE_ROTATE;
     ResetLimiters();
     last_control_time_ = ros::Time();
@@ -561,9 +651,56 @@ void WaypointTracker::EnterPausedLocked() {
 void WaypointTracker::EnterFinishedLocked() {
     state_ = State::FINISHED;
     phase_ = Phase::PHASE_ROTATE;
+    reverse_ = false;
     ResetLimiters();
     last_control_time_ = ros::Time();
     ROS_INFO("[WaypointTracker] All waypoints completed. Holding position.");
+}
+
+// 进入返航：把当前目标索引回退一个，然后从该航点开始反方向逐个回退。
+// 之所以回退一个，是因为 current_index_ 表示"正在飞往的目标"，
+// 返航的第一步应当回到"上一个已经离开的航点"。
+void WaypointTracker::EnterReturningLocked() {
+    if (waypoints_.empty()) {
+        state_ = State::IDLE;
+        reverse_ = false;
+        return;
+    }
+
+    state_ = State::RETURNING;
+    reverse_ = true;
+    phase_ = Phase::PHASE_ROTATE;
+    ResetLimiters();
+    last_control_time_ = ros::Time();
+
+    if (current_index_ > 0) {
+        --current_index_;
+    }
+    if (current_index_ >= waypoints_.size()) {
+        current_index_ = waypoints_.size() - 1;
+    }
+}
+
+void WaypointTracker::EnterReturnFinishedLocked() {
+    state_ = State::RETURN_FINISHED;
+    phase_ = Phase::PHASE_ROTATE;
+    reverse_ = false;
+    ResetLimiters();
+    last_control_time_ = ros::Time();
+    ROS_INFO("[WaypointTracker] Return finished at first waypoint. Holding position, "
+             "waiting for upper layer to switch to Land.");
+}
+
+const char* WaypointTracker::StateName() const {
+    switch (state_) {
+        case State::IDLE:            return "IDLE";
+        case State::RUNNING:         return "RUNNING";
+        case State::PAUSED:          return "PAUSED";
+        case State::FINISHED:        return "FINISHED";
+        case State::RETURNING:       return "RETURNING";
+        case State::RETURN_FINISHED: return "RETURN_FINISHED";
+        default:                     return "UNKNOWN";
+    }
 }
 
 void WaypointTracker::ResetLimiters() {
@@ -589,6 +726,13 @@ void WaypointTracker::ControlTimerCallback(const ros::TimerEvent& event) {
         cruise_complete_pending_ = false;
         cruise_complete_timer_.stop();   // 复位 started_，保证 oneshot 能被重新排程
         cruise_complete_timer_.start();
+    }
+
+    // 锁外：检查返航完成标志，同样走 oneshot timer
+    if (return_complete_pending_) {
+        return_complete_pending_ = false;
+        return_complete_timer_.stop();
+        return_complete_timer_.start();
     }
 }
 
@@ -642,6 +786,56 @@ void WaypointTracker::CruiseCompleteTimerCallback(const ros::TimerEvent&) {
     cruise_complete_retry_count_ = 0;
 }
 
+// 返航完成通知：与 CruiseCompleteTimerCallback 结构一致（延迟通知 + 重试 + 自复位）
+void WaypointTracker::ReturnCompleteTimerCallback(const ros::TimerEvent&) {
+    // [锁外] 等待服务就绪 + 调用，避免阻塞其他回调
+    if (!return_complete_client_.waitForExistence(ros::Duration(2.0))) {
+        ++return_complete_retry_count_;
+        if (return_complete_retry_count_ >= kMaxReturnCompleteRetries) {
+            ROS_ERROR("[WaypointTracker] return_complete service unavailable after %d retries, giving up.",
+                      return_complete_retry_count_);
+            return_complete_retry_count_ = 0;
+            std::lock_guard<std::mutex> lock(mutex_);
+            EnterIdleLocked();
+            current_index_ = 0;
+            return;
+        }
+        ROS_WARN_THROTTLE(1.0,
+            "[WaypointTracker] return_complete service not available, retry %d/%d...",
+            return_complete_retry_count_, kMaxReturnCompleteRetries);
+        return_complete_pending_ = true;  // 触发下一个 tick 重试
+        return;
+    }
+
+    std_srvs::Empty srv;
+    if (!return_complete_client_.call(srv)) {
+        ++return_complete_retry_count_;
+        if (return_complete_retry_count_ >= kMaxReturnCompleteRetries) {
+            ROS_ERROR("[WaypointTracker] return_complete service call failed after %d retries, giving up.",
+                      return_complete_retry_count_);
+            return_complete_retry_count_ = 0;
+            std::lock_guard<std::mutex> lock(mutex_);
+            EnterIdleLocked();
+            current_index_ = 0;
+            return;
+        }
+        ROS_WARN_THROTTLE(1.0,
+            "[WaypointTracker] return_complete service call failed, retry %d/%d...",
+            return_complete_retry_count_, kMaxReturnCompleteRetries);
+        return_complete_pending_ = true;
+        return;
+    }
+
+    // [锁内] 服务调用成功，复位到 IDLE（后续 Land 由状态机负责）
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        EnterIdleLocked();
+        current_index_ = 0;
+        ROS_INFO("[WaypointTracker] Called return_complete event service successfully. Self-reset to IDLE.");
+    }
+    return_complete_retry_count_ = 0;
+}
+
 void WaypointTracker::RunControlStep(const ros::Time& now) {
     geometry_msgs::Twist out_cmd;
     bool publish_zero_once = false;
@@ -652,10 +846,19 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // 非 RUNNING 状态：维持悬停
-        if (state_ != State::RUNNING) {
+        // 追踪态：正方向 RUNNING 与反方向 RETURNING 共用同一套追踪逻辑，
+        // 区别只在“到达后 index 怎么走”和“目标 yaw 是否翻转”。
+        const bool tracking = (state_ == State::RUNNING || state_ == State::RETURNING);
+        const bool reverse = (state_ == State::RETURNING);
+        // 保持成员与当前方向一致（PAUSED 时不被覆盖，留给 resume 判断）
+        if (tracking) {
+            reverse_ = reverse;
+        }
+
+        // 非追踪状态：维持悬停
+        if (!tracking) {
             // 持续以低频发零速指令，避免飞控失控保护
-            // （IDLE/PAUSED/FINISHED 都走这里）
+            // （IDLE/PAUSED/FINISHED/RETURN_FINISHED 都走这里）
             ResetLimiters();
             last_control_time_ = ros::Time();
             // 直接构造零速指令（默认全 0）
@@ -666,8 +869,12 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
             if (state_ == State::FINISHED && !cruise_complete_pending_) {
                 cruise_complete_pending_ = true;
             }
+            // 检测 RETURN_FINISHED 状态，设置返航完成标志
+            if (state_ == State::RETURN_FINISHED && !return_complete_pending_) {
+                return_complete_pending_ = true;
+            }
         } else {
-            // RUNNING：执行追踪逻辑
+            // RUNNING / RETURNING：执行追踪逻辑
 
             if (!has_odometry_) {
                 ROS_WARN_THROTTLE(
@@ -733,48 +940,78 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
                         if (arrived) {
                             const std::size_t old_index = current_index_;
                             const bool current_is_stop = waypoints_[current_index_].stop;
-                            ++current_index_;
 
-                            if (current_is_stop) {
-                                ROS_INFO("[WaypointTracker] Arrived at stop waypoint #%d (index %zu/%zu)",
-                                         waypoints_[old_index].stop_number,
-                                         old_index,
-                                         waypoints_.empty() ? 0 : (waypoints_.size() - 1));
-                                stop_arrived_number = waypoints_[old_index].stop_number;
+                            if (reverse) {
+                                // ── 返航方向：索引递减，到 index 0 即返航结束 ──
+                                if (old_index == 0) {
+                                    ROS_INFO("[WaypointTracker] Return reached first waypoint "
+                                             "(index 0). Return finished.");
+                                    EnterReturnFinishedLocked();
+                                    publish_cmd = true;
+                                    publish_desired_step = false;
+                                } else {
+                                    --current_index_;
+                                    // 反向到达一个航点后同样原地转向再前进，
+                                    // 保证每一段都从静止起步、姿态可控。
+                                    phase_ = Phase::PHASE_ROTATE;
+                                    ResetLimiters();
+                                    out_cmd.linear.x = 0.0;
+                                    out_cmd.linear.y = 0.0;
+                                    out_cmd.linear.z = 0.0;
+                                    out_cmd.angular.z = 0.0;
+                                    publish_cmd = true;
+                                    publish_desired_step = true;
+                                    ROS_INFO("[WaypointTracker] Return passed index %zu, "
+                                             "next target index %zu.",
+                                             old_index, current_index_);
+                                }
+                                // 返航途中刻意不发布 stop_arrived：
+                                // 该话题会触发前端的航点拍照/回传逻辑，反向经过时不应重复触发。
                             } else {
-                                ROS_DEBUG("[WaypointTracker] Arrived at waypoint %zu/%zu (pass-through)",
-                                          old_index,
-                                          waypoints_.empty() ? 0 : (waypoints_.size() - 1));
-                            }
+                                // ── 正方向：索引递增（原有逻辑） ──
+                                ++current_index_;
 
-                            if (current_index_ >= waypoints_.size()) {
-                                EnterFinishedLocked();
-                                publish_cmd = true;
-                                publish_desired_step = false;
-                            } else if (current_is_stop) {
-                                // 停留点到达：走原有流程 - ResetLimiters, PHASE_ROTATE
-                                phase_ = Phase::PHASE_ROTATE;
-                                ResetLimiters();
-                                out_cmd.linear.x = 0.0;
-                                out_cmd.linear.y = 0.0;
-                                out_cmd.linear.z = 0.0;
-                                out_cmd.angular.z = 0.0;
-                                publish_cmd = true;
-                                publish_desired_step = true;
-                            } else {
-                                // 穿越点到达：保持 PHASE_MOVE，速度无缝衔接
-                                phase_ = Phase::PHASE_MOVE;
-                                double vx_body = 0.0;
-                                double vy_body = 0.0;
-                                TransformWorldFluVelocityToBodyFlu(
-                                    vx_world, vy_world, current_yaw,
-                                    &vx_body, &vy_body);
-                                out_cmd.linear.x = vx_body;
-                                out_cmd.linear.y = vy_body;
-                                out_cmd.linear.z = vz_world;
-                                out_cmd.angular.z = vyaw;
-                                publish_cmd = true;
-                                publish_desired_step = true;
+                                if (current_is_stop) {
+                                    ROS_INFO("[WaypointTracker] Arrived at stop waypoint #%d (index %zu/%zu)",
+                                             waypoints_[old_index].stop_number,
+                                             old_index,
+                                             waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                                    stop_arrived_number = waypoints_[old_index].stop_number;
+                                } else {
+                                    ROS_DEBUG("[WaypointTracker] Arrived at waypoint %zu/%zu (pass-through)",
+                                              old_index,
+                                              waypoints_.empty() ? 0 : (waypoints_.size() - 1));
+                                }
+
+                                if (current_index_ >= waypoints_.size()) {
+                                    EnterFinishedLocked();
+                                    publish_cmd = true;
+                                    publish_desired_step = false;
+                                } else if (current_is_stop) {
+                                    // 停留点到达：走原有流程 - ResetLimiters, PHASE_ROTATE
+                                    phase_ = Phase::PHASE_ROTATE;
+                                    ResetLimiters();
+                                    out_cmd.linear.x = 0.0;
+                                    out_cmd.linear.y = 0.0;
+                                    out_cmd.linear.z = 0.0;
+                                    out_cmd.angular.z = 0.0;
+                                    publish_cmd = true;
+                                    publish_desired_step = true;
+                                } else {
+                                    // 穿越点到达：保持 PHASE_MOVE，速度无缝衔接
+                                    phase_ = Phase::PHASE_MOVE;
+                                    double vx_body = 0.0;
+                                    double vy_body = 0.0;
+                                    TransformWorldFluVelocityToBodyFlu(
+                                        vx_world, vy_world, current_yaw,
+                                        &vx_body, &vy_body);
+                                    out_cmd.linear.x = vx_body;
+                                    out_cmd.linear.y = vy_body;
+                                    out_cmd.linear.z = vz_world;
+                                    out_cmd.angular.z = vyaw;
+                                    publish_cmd = true;
+                                    publish_desired_step = true;
+                                }
                             }
                         } else {
                             double vx_body = 0.0;
@@ -820,6 +1057,39 @@ void WaypointTracker::RunControlStep(const ros::Time& now) {
             out_cmd.linear.x, out_cmd.linear.y, out_cmd.linear.z,
             out_cmd.angular.z);
     }
+
+    // 状态上报（内部限频 2Hz）：供遥控器/上层显示当前状态与航点索引
+    PublishStatus();
+}
+
+void WaypointTracker::PublishStatus() {
+    const ros::Time now = ros::Time::now();
+    if (!last_status_publish_time_.isZero() &&
+        (now - last_status_publish_time_).toSec() < 0.5) {
+        return;
+    }
+    last_status_publish_time_ = now;
+
+    const char* state_name = "UNKNOWN";
+    std::size_t index = 0;
+    std::size_t total = 0;
+    bool reverse = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_name = StateName();
+        index = current_index_;
+        total = waypoints_.size();
+        reverse = reverse_;
+    }
+
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"state\":\"%s\",\"index\":%zu,\"total\":%zu,\"reverse\":%s}",
+                  state_name, index, total, reverse ? "true" : "false");
+
+    std_msgs::String msg;
+    msg.data = buf;
+    status_publisher_.publish(msg);
 }
 
 // 计算当前 tick 的期望世界系速度（执行限幅器 Update）
@@ -848,7 +1118,12 @@ void WaypointTracker::ComputeDesiredWorldVelocities(double dt,
     const Waypoint& target = waypoints_[current_index_];
     const auto& current_pos = latest_odometry_.pose.pose.position;
 
-    const double yaw_err = NormalizeAngleRad(target.yaw_rad - current_yaw_rad);
+    // 返航时航点里记录的是"去程"朝向：翻转 180° 后机头才朝反方向的行进方向，
+    // 否则会长距离倒着飞。reverse_flip_yaw=false 时保留原朝向（机头不变）。
+    const double yaw_offset = (reverse_ && config_.reverse_flip_yaw) ? kPi : 0.0;
+    const double target_yaw_rad = NormalizeAngleRad(target.yaw_rad + yaw_offset);
+
+    const double yaw_err = NormalizeAngleRad(target_yaw_rad - current_yaw_rad);
     const double abs_yaw_err = std::fabs(yaw_err);
 
     // ---------------- 阶段 1：原地旋转 ----------------
